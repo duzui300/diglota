@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import corpus_dir  # noqa: E402
+from corpus_support import has_real_corpus, real_corpus  # noqa: E402
 
 from app import diglot  # noqa: E402
 
@@ -142,9 +143,7 @@ def test_every_bold_span_in_the_corpus_survives_into_the_text():
     gloss is. What is *not* allowed is for the words to be nowhere at all, which
     is what the bug did.
     """
-    corpus = corpus_dir()
-    if not corpus.is_dir():
-        pytest.skip("corpus not available")
+    corpus = real_corpus()
     bold = re.compile(r"\*\*([^*]+)\*\*")
     words = re.compile(r"[^\W\d_]+", re.UNICODE)
     checked = 0
@@ -427,7 +426,7 @@ def test_reference_lines_are_set_apart(tmp_path):
 # ------------------------------------------------------------------ corpus --
 
 
-@pytest.mark.skipif(not CORPUS.is_dir(), reason="the diglot corpus is not on this machine")
+@pytest.mark.skipif(not has_real_corpus(), reason="no corpus to calibrate against")
 def test_corpus_parses():
     articles = diglot.parse_corpus(CORPUS)
     assert len(articles) >= 15
@@ -439,7 +438,7 @@ def test_corpus_parses():
         assert article.vocab or article.grammar
 
 
-@pytest.mark.skipif(not CORPUS.is_dir(), reason="the diglot corpus is not on this machine")
+@pytest.mark.skipif(not has_real_corpus(), reason="no corpus to calibrate against")
 def test_corpus_segmentation_is_plausible():
     """No long span should be mostly in the other language.
 

@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import corpus_dir  # noqa: E402
+from corpus_support import real_corpus  # noqa: E402
 
 from app import analytics, corpus, reading  # noqa: E402
 from app.diglot import parse_article  # noqa: E402
@@ -235,9 +236,7 @@ def test_pruning_caps_each_passage_connections():
 def test_the_real_corpus_does_not_collapse_into_one_cluster():
     """Measured before the fix: 268 edges, density 0.97, one cluster covering
     everything. A graph that says everything is related says nothing."""
-    folder = corpus_dir()
-    if not folder.is_dir():
-        pytest.skip("corpus not on this machine")
+    folder = real_corpus()
     from app.library import Library
 
     library = Library(folder, Path("data/library"))
@@ -356,9 +355,7 @@ def test_every_topic_word_can_be_checked_against_the_titles_it_came_from():
     """The point of naming a group this way rather than asking a model: the reader
     can look at the titles and see whether the label is fair. A word that appears
     in one title cannot be checked, which is why two members is the floor."""
-    folder = corpus_dir()
-    if not folder.is_dir():
-        pytest.skip("corpus not on this machine")
+    folder = real_corpus()
     from app.library import Library
 
     library = Library(folder, Path("data/library"))

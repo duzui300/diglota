@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import corpus_dir  # noqa: E402
+from corpus_support import real_corpus  # noqa: E402
 
 from app import fetch, recommend, registers  # noqa: E402
 from app.diglot import parse_article, parse_corpus  # noqa: E402
@@ -281,8 +282,7 @@ def test_the_annotation_does_not_mutate_the_search_result():
 def test_the_corpus_library_has_registers_worth_broadening_into(tmp_path):
     """The real shelf, not a fixture: the gap feature is pointless if the library
     it reads has only one register in it."""
-    if not CORPUS.is_dir():
-        pytest.skip("corpus not available")
+    real_corpus()
     from app.library import Library
 
     shelf = Library(CORPUS, tmp_path / "library")

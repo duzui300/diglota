@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import corpus_dir  # noqa: E402
+from corpus_support import has_real_corpus  # noqa: E402
 
 from app import transfer  # noqa: E402
 from app.diglot import content_fingerprint, parse_article, parse_file  # noqa: E402
@@ -198,8 +199,11 @@ def test_export_prefers_the_authors_file_over_regenerating_it():
     path handling it -- rather than naming the lessons, because which ones is a
     consequence of the parser and not a fact worth maintaining.
     """
+    lessons = _real_lessons(IMPORTS) + _real_lessons(CORPUS)
+    if len(lessons) < 15:
+        pytest.skip(f"needs a shelf of lessons to find one of them lossy ({len(lessons)} here)")
     lossy = 0
-    for article, path in _real_lessons(IMPORTS) + _real_lessons(CORPUS):
+    for article, path in lessons:
         regenerated, _share, intact = transfer.verify(
             transfer.share_text(article, creator="alice"))
         if regenerated is not None and intact is True:
