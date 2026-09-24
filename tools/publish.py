@@ -26,6 +26,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,12 +51,34 @@ def tracked_files() -> list[str]:
     return [name for name in out if name not in EXCLUDE]
 
 
+def copy_one(source: Path, destination: Path) -> None:
+    """Copy a file, waiting a moment if Windows says it is in use.
+
+    Running the app *from the export* -- which is exactly what you do to check a
+    release -- leaves a process holding the files it imported. Windows then refuses
+    the overwrite with a sharing violation, which looks like a bug in this script and
+    is really "something is still reading that file". Three tries, then a message
+    that says which file and what to do about it.
+    """
+    for attempt in range(3):
+        try:
+            shutil.copy2(source, destination)
+            return
+        except PermissionError:
+            if attempt == 2:
+                raise SystemExit(
+                    f"cannot write {destination}: another process is using it. "
+                    "Stop the app if it is running from the export, then run this again."
+                )
+            time.sleep(0.7)
+
+
 def copy_out(target: Path) -> int:
     files = tracked_files()
     for name in files:
-        source, destination = ROOT / name, target / name
+        destination = target / name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        copy_one(ROOT / name, destination)
 
     # Remove anything the export no longer has. Never `.git`, which holds the
     # remote this was pushed to last time.
