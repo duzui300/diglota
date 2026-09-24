@@ -1,4 +1,4 @@
-# Diglot
+# Diglota
 
 A reading-first app for learning Spanish from English.
 
