@@ -223,6 +223,8 @@ h1, h2, h3, h4 { margin: 0 0 .4em; line-height: 1.25; font-weight: 650; letter-s
 .panel-inset p { margin: 0 0 10px; }
 .settings-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
                   font-size: 13px; color: var(--ink-2); }
+/* Stopping the app sits apart from the settings above it: it is not a setting. */
+.settings-quit { border-top: 1px solid var(--line-soft); }
 .chip.ok { background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
 .chip.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); border-color: transparent;
              color: var(--ink-2); }

@@ -16,10 +16,11 @@ import csv
 import io
 import logging
 import re
+import threading
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -432,6 +433,40 @@ app = FastAPI(title="Diglot", version="1.0", lifespan=lifespan)
 
 def ctx() -> App:
     return app.state.app
+
+
+# Stopping the app from inside the app.
+#
+# The launcher starts it with pythonw, which has no console and no window: without
+# this the only way to stop it is the Task Manager, and "just close the window" --
+# the answer on every other app -- is not available. run.py hands the server's own
+# exit flag in here.
+_shutdown: Callable[[], None] | None = None
+
+
+def set_shutdown_hook(hook: Callable[[], None] | None) -> None:
+    global _shutdown
+    _shutdown = hook
+
+
+@app.post("/api/quit")
+def quit_app() -> dict[str, Any]:
+    """Stop the server, because the reader asked it to.
+
+    The reply goes out first -- the exit is scheduled a moment later on a timer -- so
+    the browser gets an answer rather than a dropped connection. Nothing is lost in
+    the shutdown: every save is its own committed transaction and the jobs, the
+    warmer and the database are closed by the lifespan, which has been doing that for
+    every other kind of stop.
+
+    Not available when the app was started some other way (an embedding server, a
+    test client), and that is said rather than silently ignored.
+    """
+    if _shutdown is None:
+        raise HTTPException(
+            501, "this app was started in a way that cannot be stopped from here")
+    threading.Timer(0.4, _shutdown).start()
+    return {"stopping": True}
 
 
 # --------------------------------------------------------------------------- #

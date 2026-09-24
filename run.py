@@ -19,6 +19,7 @@ import sys
 import uvicorn
 
 from app.config import Settings
+from app.server import set_shutdown_hook
 
 
 def main() -> None:
@@ -54,13 +55,14 @@ def main() -> None:
               "generated or graded, so reading, quotes and review are what there is")
     print(f"\n  →  http://{args.host}:{args.port}\n")
 
-    uvicorn.run(
-        "app.server:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="info",
-    )
+    # Built by hand rather than with ``uvicorn.run`` so the server object exists to
+    # be stopped: the reader can quit from the app, which matters because the
+    # launcher starts it with no console and no window to close.
+    config = uvicorn.Config("app.server:app", host=args.host, port=args.port,
+                            reload=args.reload, log_level="info")
+    server = uvicorn.Server(config)
+    set_shutdown_hook(lambda: setattr(server, "should_exit", True))
+    server.run()
 
 
 if __name__ == "__main__":

@@ -4434,7 +4434,12 @@ async function openSettings() {
       <span class="small muted" id="settings-note"></span>
     </div>
     <p class="small muted" style="margin-bottom:0">Advanced: the TypeSafe key for graded exercises is read
-    from <code>${escapeHtml(current.env_file || '.env')}</code>, and left alone here${judge.ready ? '' : ' (it is not set)'}.</p>`);
+    from <code>${escapeHtml(current.env_file || '.env')}</code>, and left alone here${judge.ready ? '' : ' (it is not set)'}.</p>
+    <div class="row settings-quit" style="margin-top:16px; padding-top:14px">
+      <button class="btn ghost sm" id="settings-quit"
+              title="Stop the app on this machine. Everything is already saved; start it again the same way you started it.">Quit the app</button>
+      <span class="small muted">Nothing is lost — every save is already on disk.</span>
+    </div>`);
 
   const send = async (body, button) => {
     const label = button.textContent;
@@ -4472,6 +4477,41 @@ async function openSettings() {
   });
   $('#settings-clear').addEventListener('click', () =>
     send({ llm_api_key: '', llm_base_url: '', llm_model: '' }, $('#settings-clear')));
+
+  /* Stopping the app from the app.
+     Two clicks, the pattern used everywhere else something cannot be undone by
+     pressing the button again -- and here there is nothing to press, because the
+     page it lives on stops answering. Nothing is at risk: every save is its own
+     committed transaction, and this is how a reader who started the app by
+     double-clicking gets to stop it without the Task Manager. */
+  $('#settings-quit').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    if (button.dataset.armed !== '1') {
+      button.dataset.armed = '1';
+      button.classList.add('danger');
+      button.textContent = 'Quit the app?';
+      setTimeout(() => {
+        if (button.dataset.armed === '1') {
+          button.dataset.armed = '0';
+          button.classList.remove('danger');
+          button.textContent = 'Quit the app';
+        }
+      }, 3500);
+      return;
+    }
+    button.disabled = true;
+    try {
+      await api('/api/quit', { method: 'POST' });
+      closeModal();
+      toast('Closed — everything is saved. You can close this tab.');
+    } catch (err) {
+      button.disabled = false;
+      button.dataset.armed = '0';
+      button.classList.remove('danger');
+      button.textContent = 'Quit the app';
+      toast(err.message, 'err');
+    }
+  });
 }
 
 /* -- sharing a lesson ------------------------------------------------------ */

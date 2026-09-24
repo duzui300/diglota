@@ -739,6 +739,10 @@ def run(page: Page, *, with_ai: bool) -> None:
           and (settings_api["llm"]["key_set"] is False
                or settings_api["llm"]["key_hint"] in page.locator("#modal-body").inner_text()),
           page.locator("#modal-body").inner_text()[-200:])
+    check("settings offers a way to stop the app",
+          page.locator("#settings-quit").count() == 1
+          and "Quit" in page.locator("#settings-quit").inner_text(),
+          "no quit control")
     check("and it says whether the model is ready",
           ("model ready" in page.locator("#settings-state").inner_text())
           == bool(settings_api["llm"]["ready"]),

@@ -84,10 +84,12 @@ class Settings:
     llm_model: str = field(default_factory=lambda: os.environ.get("LLM_MODEL", ""))
     typesafe_api_key: str = field(default_factory=lambda: os.environ.get("TYPESAFE_API_KEY", ""), repr=False)
     typesafe_model: str = field(default_factory=lambda: os.environ.get("TYPESAFE_MODEL", "jev-latest"))
-    # Outbound web access on this machine only works through the local proxy;
-    # direct connections time out. Empty string means "connect directly", which
-    # is what you want anywhere else.
-    proxy: str = field(default_factory=lambda: os.environ.get("DIGLOT_PROXY", "http://127.0.0.1:7890"))
+    # Outbound web access, for a machine that needs a proxy. **Empty means connect
+    # directly**, which is right nearly everywhere -- so it defaults to empty and a
+    # machine behind one sets DIGLOT_PROXY. It used to default to this machine's own
+    # proxy, which meant a fresh clone failed every fetch with a connection error
+    # until the reader worked out why.
+    proxy: str = field(default_factory=lambda: os.environ.get("DIGLOT_PROXY", ""))
     env_path: Path | None = None
     # The values the environment gave, kept so clearing a panel setting can put
     # them back: the file is an overlay, and an overlay needs something to sit on.

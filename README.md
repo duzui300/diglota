@@ -19,6 +19,38 @@ breakdown, in the same Markdown format as the hand-made corpus it ships with.
 
 ## Running it
 
+### What you need first
+
+- **Python 3.10 or newer.** Nothing here is compiled and nothing is bundled: the app
+  is Python, and your machine has to have it.
+- **Four packages**, one command:
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+  | package | what it is for |
+  | --- | --- |
+  | `fastapi` | the web app (brings `pydantic` and `starlette` with it) |
+  | `uvicorn[standard]` | the server that serves it |
+  | `python-dotenv` | reading a `.env` file, if you keep one |
+  | `typesafe-sdk` | *optional* — the Jev grading tier, imported only when used |
+
+  That is the whole runtime dependency list. There is no database server to install
+  (SQLite is in Python) and no JavaScript build step (`static/` is served as it is).
+
+- **Only if you want to run the tests**, a separate list:
+
+  ```bash
+  pip install -r requirements-dev.txt   # pytest, playwright
+  python -m pytest -q                   # 530 unit tests
+  python tools/ui_test.py               # 275 browser checks (drives your Chrome)
+  ```
+
+  Nothing in the app imports these, so a reader never needs them.
+
+### Start it
+
 **Double-click `Open Diglot.vbs`.** That is the way to run this if you are not a
 developer: it starts the app with `pythonw`, which has no console, waits for it to
 answer, and opens it in your browser. Nothing flashes up and no terminal stays open.
@@ -28,10 +60,14 @@ start. If the app is already running, it just opens the page.
 From a terminal, if you prefer:
 
 ```bash
-pip install -r requirements.txt
 python run.py                     # http://127.0.0.1:8787
 pythonw run.py --log data/app.log # the same thing the launcher does
 ```
+
+**Quit the app** from Settings when you are done — the launcher leaves no console
+and no window, so that button is how it stops. Nothing is lost by quitting: every
+save is already a committed write, and the database, the background jobs and the
+gloss warmer are all closed on the way out.
 
 Keys come from the **Settings** panel in the app (see below), then from the first
 `.env` found: this project's, then a machine-wide one if you keep one.
@@ -45,7 +81,7 @@ LLM_API_KEY=...
 LLM_MODEL=...
 
 DIGLOT_CORPUS=/path/to/your/own/diglot/articles  # optional; ./corpus by default
-DIGLOT_PROXY=http://127.0.0.1:7890               # optional; only if your network needs one
+DIGLOT_PROXY=http://127.0.0.1:7890               # optional; empty = connect directly
 ```
 
 **Both AI tiers are optional.** With neither configured the app still reads,

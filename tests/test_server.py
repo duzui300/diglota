@@ -468,6 +468,36 @@ def test_deleting_something_that_is_not_there_is_a_404(server, monkeypatch):
     assert caught.value.status_code == 404
 
 
+# ------------------------------------------------------------------ quitting --
+
+
+def test_quitting_calls_the_servers_exit(server, monkeypatch):
+    """The launcher starts the app with no console and no window, so this button is
+    the only way a reader can stop it. The call is deferred so the browser gets an
+    answer rather than a dropped connection -- which is what this waits for."""
+    import threading
+
+    from app import server as server_module
+
+    called = threading.Event()
+    monkeypatch.setattr(server_module, "_shutdown", called.set)
+    assert server_module.quit_app() == {"stopping": True}
+    assert called.wait(3), "the exit was never asked for"
+
+
+def test_quitting_says_so_when_nothing_can_stop_the_app(monkeypatch):
+    """Started some other way -- embedded, or under a test client -- and saying so is
+    better than a button that appears to work."""
+    from fastapi import HTTPException
+
+    from app import server as server_module
+
+    monkeypatch.setattr(server_module, "_shutdown", None)
+    with pytest.raises(HTTPException) as caught:
+        server_module.quit_app()
+    assert caught.value.status_code == 501
+
+
 # ---------------------------------------------------------------- settings --
 
 

@@ -1,0 +1,15 @@
+# What the *tests* need, on top of requirements.txt.
+#
+#     pip install -r requirements-dev.txt
+#     python -m pytest -q                  # 530 unit tests
+#     python tools/ui_test.py              # 275 browser checks
+#
+# The app does not import any of this: running it needs requirements.txt and
+# nothing else.
+
+pytest>=8.0
+
+# tools/ui_test.py drives the Chrome already installed on the machine
+# (`channel="chrome"`), so there is nothing to download -- playwright is the
+# library only, not a bundled browser.
+playwright>=1.40
