@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diglot — read Spanish into English</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📖</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="#/library" aria-label="Diglot library">
+    <span class="brand-mark">D</span>
+    <span class="brand-name">Diglot</span>
+  </a>
+
+  <nav class="tabs" role="tablist">
+    <a href="#/library" data-tab="library" role="tab">Library</a>
+    <a href="#/review" data-tab="review" role="tab">Review <span class="pill" id="due-pill" hidden>0</span></a>
+    <a href="#/quotes" data-tab="quotes" role="tab">Quotes</a>
+    <a href="#/write" data-tab="write" role="tab">Write</a>
+    <a href="#/stats" data-tab="stats" role="tab">Progress</a>
+  </nav>
+
+  <div class="topbar-actions">
+    <button class="btn ghost" id="btn-activity" title="Background work: imports and searches">
+      Activity <span class="pill" id="job-pill" hidden>0</span>
+    </button>
+    <button class="btn ghost" id="btn-discover" title="Find something to read: about a topic, or from the words you have saved">Discover</button>
+    <button class="btn ghost" id="btn-import" title="Turn a link, or text you paste, into a lesson">Import</button>
+    <button class="btn ghost" id="btn-settings" title="Your API key and model">Settings</button>
+    <div class="theme-switch" role="group" aria-label="Theme">
+      <button data-theme-set="paper" title="Paper">◐</button>
+      <button data-theme-set="sepia" title="Sepia">◑</button>
+      <button data-theme-set="night" title="Night">◒</button>
+    </div>
+  </div>
+</header>
+
+<!-- Reader controls, only visible while reading.
+     Placed *before* <main>: a sticky element occupies its normal-flow position,
+     so putting this after the article pins it below the whole text, where it
+     only appears once you have already scrolled past everything. -->
+<div id="reader-bar" class="reader-bar" hidden>
+  <div class="reader-bar-inner">
+    <button class="btn ghost" id="reader-back" title="Back to the library (Esc)">← Library</button>
+    <div class="reader-progress" title="How far through the article you are">
+      <div class="reader-progress-fill" id="reader-progress-fill"></div>
+    </div>
+    <div class="reader-controls">
+      <label class="toggle" title="Show the English translation after each Spanish phrase (G)">
+        <input type="checkbox" id="opt-gloss" checked><span>Glosses</span>
+      </label>
+      <label class="toggle" title="Fade the English so the Spanish stands out (F)">
+        <input type="checkbox" id="opt-dim"><span>Focus Spanish</span>
+      </label>
+      <label class="toggle" title="Hide the English entirely — read only the Spanish (E)">
+        <input type="checkbox" id="opt-es-only"><span>Spanish only</span>
+      </label>
+      <div class="stepper" role="group" aria-label="Text size">
+        <button id="font-down" title="Smaller text">A−</button>
+        <button id="font-up" title="Larger text">A+</button>
+      </div>
+      <button class="btn ghost sm" id="btn-read-aloud" title="Read the article aloud, sentence by sentence (R)">
+        ▶ Read aloud
+      </button>
+    </div>
+  </div>
+</div>
+
+<main id="view" class="view"></main>
+
+<!-- Floating actions for text selected in the reader ---------------------- -->
+<div id="selection-bar" class="selection-bar" hidden>
+  <button data-sel="quote" title="Keep this sentence in your collection">🔖 Keep</button>
+  <button data-sel="speak" title="Hear it read aloud">🔊 Hear</button>
+  <button data-sel="translate" title="Translate the selection">🌐 Translate</button>
+  <button data-sel="explain" title="Explain the grammar">💡 Explain</button>
+</div>
+
+<!-- Word popup ------------------------------------------------------------- -->
+<div id="popover" class="popover" hidden>
+  <div class="popover-head">
+    <div>
+      <div class="popover-term" id="pop-term">—</div>
+      <div class="popover-sub" id="pop-sub"></div>
+    </div>
+    <button class="icon-btn" id="pop-close" title="Close (Esc)">✕</button>
+  </div>
+  <div class="popover-body" id="pop-body"></div>
+  <div class="popover-actions" id="pop-actions"></div>
+</div>
+
+<!-- Modal ------------------------------------------------------------------ -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h2 id="modal-title">Title</h2>
+      <button class="icon-btn" id="modal-close" title="Close (Esc)">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- Activity: background jobs, outliving the dialog that started them ------- -->
+<aside id="activity" class="activity" hidden aria-label="Background activity">
+  <div class="activity-head">
+    <h2>Activity</h2>
+    <button class="icon-btn" id="activity-clear" title="Clear finished jobs">Clear</button>
+    <button class="icon-btn" id="activity-close" title="Close (Esc)">✕</button>
+  </div>
+  <div class="activity-list" id="activity-list"></div>
+</aside>
+
+<div id="toasts" class="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

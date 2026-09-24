@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# The user's own data: their deck, their reading history, their clippings, and
+# every article the app generated for them. None of it belongs in a repository.
+data/
+server.log
+
+# Screenshots from the browser-test tooling. It writes ~45 of them on every run,
+# each one a picture of whatever library the run happened to have; the handful the
+# README uses live in assets/ and are taken deliberately.
+shots/
+*.log
+
+.env
