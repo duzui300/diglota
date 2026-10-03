@@ -2069,6 +2069,58 @@ function articleMatchesRegister(article, register) {
   return register === 'all' || (article.register || 'unspecified') === register;
 }
 
+/* Searching the shelf, for when you remember the passage but not which shelf it is
+   on. A query is a moment rather than a mode, so unlike the two filters above it is
+   not remembered between visits: coming back to a library that is quietly filtered
+   by something you typed three days ago is worse than typing it again.
+
+   What a passage can be found by: what it is called, who wrote it, where it came
+   from, the preview, and how it is classified. Not its text -- the shelf is sent
+   with what it displays, and searching every lesson's prose would mean shipping all
+   of it to the page to answer a question people mostly ask by title. */
+let libraryQuery = '';
+
+function articleMatchesQuery(article, query) {
+  if (!query) return true;
+  const haystack = fold([
+    article.title, article.author, article.preview, article.level, article.shelf,
+    article.url ? hostOf(article.url) : '',
+    REGISTER_LABELS[article.register] || article.register,
+  ].filter(Boolean).join(' '));
+  return haystack.includes(fold(query));
+}
+
+/* The shelves, or why there are none. Its own function because the search re-renders
+   this and only this: the input the reader is typing into must not be rebuilt under
+   their caret. */
+function libraryShelvesHtml(articles, query) {
+  if (!articles.length) {
+    if (query) {
+      return `<div class="empty"><h3>Nothing matches “${escapeHtml(query)}”</h3>
+        <p>Searched titles, authors, sources, levels and registers — not the text of
+        the lessons themselves.</p>
+        <p style="margin-top:14px"><button class="btn ghost sm" id="library-search-clear">
+          Clear the search</button></p></div>`;
+    }
+    return `<div class="empty"><h3>Nothing ${libraryFilter === 'finished' ? 'finished' : 'unread'}</h3>
+      <p>${libraryFilter === 'finished'
+        ? 'Articles you mark as finished will collect here.'
+        : 'Every article has been opened at least once. Try another filter.'}</p></div>`;
+  }
+
+  const shelves = new Map();
+  for (const article of articles) {
+    if (!shelves.has(article.shelf)) shelves.set(article.shelf, []);
+    shelves.get(article.shelf).push(article);
+  }
+  return [...shelves].map(([shelf, group]) => `<section class="shelf">
+      <div class="shelf-head"><h2>${escapeHtml(shelf)}</h2>
+        <span class="count">${group.length}</span></div>
+      <p class="shelf-desc">${escapeHtml(group[0].shelf_description || '')}</p>
+      <div class="grid">${group.map(articleCard).join('')}</div>
+    </section>`).join('');
+}
+
 async function viewLibrary() {
   setActiveTab('library');
   $('#reader-bar').hidden = true;
@@ -2099,14 +2151,9 @@ async function viewLibrary() {
   const presentRegisters = REGISTER_ORDER.filter(code => registerCounts[code]);
   if (registerFilter !== 'all' && !registerCounts[registerFilter]) registerFilter = 'all';
 
+  const query = libraryQuery.trim();
   const shown = data.articles.filter(a => articleMatchesFilter(a, libraryFilter)
-    && articleMatchesRegister(a, registerFilter));
-
-  const shelves = new Map();
-  for (const article of shown) {
-    if (!shelves.has(article.shelf)) shelves.set(article.shelf, []);
-    shelves.get(article.shelf).push(article);
-  }
+    && articleMatchesRegister(a, registerFilter) && articleMatchesQuery(a, query));
 
   const readCount = counts.finished;
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -2127,7 +2174,10 @@ async function viewLibrary() {
         ${label} <span class="muted">${counts[key]}</span>
       </button>`).join('')}
     <span class="spacer"></span>
-    ${counts.reading ? `<span class="small muted">${counts.reading} part-read</span>` : ''}
+    <span class="small muted" id="library-match"></span>
+    <input type="search" id="library-search" class="library-search"
+           placeholder="Search titles, authors, sources…" aria-label="Search the library"
+           value="${escapeHtml(libraryQuery)}">
   </div>`);
 
   if (presentRegisters.length > 1) {
@@ -2157,22 +2207,7 @@ async function viewLibrary() {
     </div>`);
   }
 
-  if (!shown.length) {
-    parts.push(`<div class="empty"><h3>Nothing ${libraryFilter === 'finished' ? 'finished' : 'unread'}</h3>
-      <p>${libraryFilter === 'finished'
-        ? 'Articles you mark as finished will collect here.'
-        : 'Every article has been opened at least once. Try another filter.'}</p></div>`);
-  }
-
-  for (const [shelf, articles] of shelves) {
-    const description = articles[0].shelf_description || '';
-    parts.push(`<section class="shelf">
-      <div class="shelf-head"><h2>${escapeHtml(shelf)}</h2>
-        <span class="count">${articles.length}</span></div>
-      <p class="shelf-desc">${escapeHtml(description)}</p>
-      <div class="grid">${articles.map(articleCard).join('')}</div>
-    </section>`);
-  }
+  parts.push(`<div id="library-shelves">${libraryShelvesHtml(shown, query)}</div>`);
   view.innerHTML = parts.join('');
 
   const openShare = $('#btn-open-share', view);
@@ -2188,7 +2223,11 @@ async function viewLibrary() {
     store.set('registerFilter', registerFilter);
     viewLibrary();
   }));
-  $$('.card', view).forEach(card => card.addEventListener('click', () => { location.hash = `#/read/${card.dataset.slug}`; }));
+  /* Cards are wired separately from the view, because the search re-renders the
+     shelves and the cards inside them are new elements that have never been
+     wired. */
+  const wireCards = (scope) => {
+  $$('.card', scope).forEach(card => card.addEventListener('click', () => { location.hash = `#/read/${card.dataset.slug}`; }));
   $$('[data-remove-lesson]', view).forEach(button => button.addEventListener('click', async (event) => {
     event.stopPropagation();
     // Two clicks rather than a dialog: the file it deletes cannot be got back, and
@@ -2220,6 +2259,55 @@ async function viewLibrary() {
       toast(err.message, 'err');
     }
   }));
+  };
+  wireCards(view);
+
+  /* Searching re-renders the shelves and the count beside the box, and nothing
+     else: the input keeps its own value, its focus and its caret. No debounce --
+     the whole library is already in the page, so filtering it is a loop over two
+     dozen objects. */
+  const search = $('#library-search');
+  const match = $('#library-match');
+  const filtered = () => data.articles.filter(a => articleMatchesFilter(a, libraryFilter)
+    && articleMatchesRegister(a, registerFilter) && articleMatchesQuery(a, libraryQuery.trim()));
+
+  const paintMatch = (rows) => {
+    if (!match) return;
+    match.textContent = libraryQuery.trim()
+      ? `${rows.length} of ${data.articles.length} match${rows.length === 1 ? '' : 'es'}`
+      : (counts.reading ? `${counts.reading} part-read` : '');
+  };
+
+  const setQuery = (value) => {
+    libraryQuery = value;
+    if (search) search.value = value;
+    refilter();
+    if (search) search.focus();
+  };
+
+  const refilter = () => {
+    const host = $('#library-shelves');
+    if (!host) return;
+    const rows = filtered();
+    host.innerHTML = libraryShelvesHtml(rows, libraryQuery.trim());
+    paintMatch(rows);
+    wireCards(host);
+    const clear = $('#library-search-clear');
+    if (clear) clear.addEventListener('click', () => setQuery(''));
+  };
+
+  paintMatch(shown);
+  if (search) {
+    search.addEventListener('input', () => { libraryQuery = search.value; refilter(); });
+    search.addEventListener('keydown', (event) => {
+      // Escape clears here rather than reaching the global handler, which would
+      // close the word panel or leave the reader instead.
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      setQuery('');
+    });
+  }
+
   $$('[data-worth]', view).forEach(button => button.addEventListener('click', async (event) => {
     event.stopPropagation();
     try {

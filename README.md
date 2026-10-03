@@ -43,8 +43,8 @@ breakdown, in the same Markdown format as the hand-made corpus it ships with.
 
   ```bash
   pip install -r requirements-dev.txt   # pytest, playwright
-  python -m pytest -q                   # 530 unit tests
-  python tools/ui_test.py               # 275 browser checks (drives your Chrome)
+  python -m pytest -q                   # 532 unit tests
+  python tools/ui_test.py               # 287 browser checks (drives your Chrome)
   ```
 
   Nothing in the app imports these, so a reader never needs them.
@@ -232,12 +232,28 @@ your own note, the focus word — and accents are folded, so `cuestion` finds
 `cuestión`. Look a word up while reading and the popover shows the sentences you
 kept with it, which is what makes the collection live rather than a graveyard.
 
-### Filter by what you have read
+### Find the one you want
 
-The library filters by read state — **All / Unread / Started / Finished** — with
-a count on each, remembered between visits. Reaching the end of an article marks
-it finished automatically; requiring a button press for that would leave the
-Finished shelf empty for anyone who simply read the thing.
+The library filters by read state — **All / Unread / Started / Finished** — with a
+count on each, remembered between visits. Reaching the end of an article marks it
+finished automatically; requiring a button press for that would leave the Finished
+shelf empty for anyone who simply read the thing. There is a second row for
+**register**, offering only the kinds the library actually contains.
+
+**And it searches.** Type into the box at the end of the filter row and the shelf
+narrows to the passages whose title, author, source, preview, level or register
+matches — case-insensitively, with accents folded, so `cuestion` finds `cuestión`. It
+narrows whatever the filters already chose rather than replacing them, and it filters
+in the page rather than over the network, so it is instant and works while offline.
+Unlike the filters, the query is *not* remembered between visits: coming back to a
+library quietly filtered by something you typed three days ago is worse than typing
+it again.
+
+What it does not search is the text of the lessons themselves. The shelf is sent with
+what it displays, and searching every passage's prose would mean shipping all of it to
+the page to answer a question people mostly ask by title. If you remember a phrase but
+not a title, **Quotes** searches everything you kept, and the word lookup shows the
+sentences you kept with a word.
 
 ### Write
 
@@ -622,8 +638,8 @@ review schedule. Those are yours and stay in your own database.
 ## Testing
 
 ```bash
-python -m pytest tests/ -q             # 530 unit tests
-python tools/ui_test.py                # 275 browser checks (294 with --with-ai)
+python -m pytest tests/ -q             # 532 unit tests
+python tools/ui_test.py                # 287 browser checks (306 with --with-ai)
 python tools/ui_test.py --with-ai      # also grades a translation end to end
 python tools/ui_import_test.py         # slow: imports a real article, waits for the pop-up
 python tools/segment_qa.py             # segmentation plausibility across the corpus

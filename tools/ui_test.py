@@ -1741,6 +1741,89 @@ def run(page: Page, *, with_ai: bool) -> None:
     page.wait_for_timeout(600)
     shot(page, "library-filter")
 
+    # -- searching the shelf ------------------------------------------------ #
+    # For when you remember the passage but not which shelf it is on: the search
+    # narrows whatever the filters already chose, rather than replacing them.
+    print("\nlibrary search")
+    page.goto(f"{BASE}/#/library")
+    page.wait_for_selector("#library-search", timeout=15000)
+    page.wait_for_timeout(700)
+
+    total = page.locator(".card").count()
+    check("the shelf offers a search box", page.locator("#library-search").count() == 1)
+
+    titles = page.eval_on_selector_all(".card h3", "els => els.map(e => e.textContent.trim())")
+    needle = next((t.split()[0] for t in titles if len(t.split()[0]) > 4), "")
+    if not needle:
+        skip("searching finds the passage it names", "no usable title in this library")
+    else:
+        page.fill("#library-search", needle)
+        page.wait_for_timeout(700)
+        found = page.locator(".card").count()
+        check("searching finds the passages whose title matches",
+              0 < found < total, f"{found} of {total} for {needle!r}")
+        cards = page.eval_on_selector_all(".card", "els => els.map(e => e.textContent.toLowerCase())")
+        check("everything it shows mentions the query somewhere",
+              all(needle.lower() in card for card in cards), str(cards[:1])[:80])
+        check("and it says how many that is",
+              f"of {total}" in page.locator("#library-match").inner_text(),
+              page.locator("#library-match").inner_text())
+
+        # Case does not have to be typed, and neither does an accent.
+        page.fill("#library-search", needle.upper())
+        page.wait_for_timeout(600)
+        check("the search ignores case", page.locator(".card").count() == found,
+              f"{page.locator('.card').count()} vs {found}")
+        check("and the box keeps what was typed",
+              page.locator("#library-search").input_value() == needle.upper())
+
+        # The box must survive its own re-render with the caret where it was.
+        page.locator("#library-search").click()
+        page.keyboard.press("End")
+        page.keyboard.type("x")
+        page.wait_for_timeout(600)
+        check("typing into it keeps the caret in the box",
+              page.evaluate("() => document.activeElement && document.activeElement.id") == "library-search"
+              and page.locator("#library-search").input_value() == needle.upper() + "x",
+              page.evaluate("() => document.activeElement && document.activeElement.id"))
+
+        page.fill("#library-search", "zzzznothing")
+        page.wait_for_timeout(700)
+        check("a query that matches nothing says so", page.locator(".card").count() == 0
+              and "zzzznothing" in page.locator("#library-shelves").inner_text(),
+              page.locator("#library-shelves").inner_text()[:80])
+
+        page.locator("#library-search-clear").click()
+        page.wait_for_timeout(700)
+        check("clearing it brings the shelf back", page.locator(".card").count() == total,
+              f"{page.locator('.card').count()} of {total}")
+        check("and empties the box", page.locator("#library-search").input_value() == "")
+
+        # Escape clears too, without closing anything else.
+        page.fill("#library-search", needle)
+        page.wait_for_timeout(600)
+        page.locator("#library-search").press("Escape")
+        page.wait_for_timeout(600)
+        check("Escape clears the search rather than leaving the page",
+              page.locator("#library-search").input_value() == ""
+              and page.locator(".card").count() == total,
+              f"{page.locator('.card').count()} of {total}")
+
+        # A search and a filter compose: both apply.
+        page.fill("#library-search", needle)
+        page.wait_for_timeout(600)
+        matched = page.locator(".card").count()
+        page.locator('[data-filter="finished"]').click()
+        page.wait_for_timeout(700)
+        check("a search narrows a filter rather than replacing it",
+              page.locator(".card").count() <= matched,
+              f"{page.locator('.card').count()} after adding a filter to {matched} matches")
+        page.locator('[data-filter="all"]').click()
+        page.wait_for_timeout(500)
+        page.fill("#library-search", "")
+        page.wait_for_timeout(500)
+        shot(page, "library-search")
+
     # -- reading analytics and the corpus map ------------------------------ #
     print("\nreading analytics")
     page.goto(f"{BASE}/#/stats")

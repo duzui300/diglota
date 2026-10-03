@@ -522,8 +522,8 @@ costs the reader a request.
 pip install -r requirements.txt
 python run.py                        # http://127.0.0.1:8787
 
-python -m pytest tests/ -q           # 530 unit tests
-python tools/ui_test.py              # 275 browser checks (294 with --with-ai)
+python -m pytest tests/ -q           # 532 unit tests
+python tools/ui_test.py              # 287 browser checks (306 with --with-ai)
 python tools/ui_import_test.py       # slow: imports a real article end to end
 python tools/segment_qa.py           # corpus segmentation health (want 0 suspect)
 ```

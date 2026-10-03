@@ -386,6 +386,15 @@ h1, h2, h3, h4 { margin: 0 0 .4em; line-height: 1.25; font-weight: 650; letter-s
 .filter-row { margin-bottom: 22px; gap: 6px; }
 .filter-row .choice.sm { gap: 5px; }
 .filter-row .choice.sm .muted { font-variant-numeric: tabular-nums; font-size: 11.5px; }
+/* At the end of the filter row, so a search narrows whatever the filters already
+   chose rather than replacing them. Sized to look like one of the chips beside it,
+   because that is what it is: another way of saying which passages you mean. */
+.library-search {
+  width: 236px; padding: 6px 11px; border-radius: 9px; font-size: 13.5px;
+  border: 1px solid var(--line); background: var(--page); color: var(--ink);
+}
+.library-search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+@media (max-width: 760px) { .library-search { width: 100%; } }
 .shelf-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
 .shelf-head h2 { font-family: var(--serif); font-size: 19px; margin: 0; font-weight: 600; text-transform: capitalize; }
 .shelf-head .count { color: var(--ink-3); font-size: 13px; }
