@@ -53,11 +53,25 @@ def build(text: str = ARTICLE, deck: list[dict] | None = None) -> tuple[Glossary
 # ---------------------------------------------------------------- indexing --
 
 
-def test_keys_cover_form_head_word_and_stem():
+def test_keys_cover_form_content_word_and_stem():
     keys = Glossary.keys_for("se vuelve")
     assert "w:se vuelve" in keys
-    assert "w:se" in keys                       # head word
+    assert "c:vuelve" in keys                   # the word that carries the meaning
     assert any(key.startswith("s:") for key in keys)
+    # ...and *not* the clitic. Keying a phrase under its first word made every
+    # reflexive phrase in a library a candidate for every other: "se vuelve" could be
+    # answered with another lesson's "se han debilitado".
+    assert "w:se" not in keys
+
+
+def test_a_clitic_never_keys_an_entry():
+    """The same rule from the other side: an entry whose first word is a clitic is
+    findable by its own form and by the word that carries its meaning, and by nothing
+    else."""
+    keys = Glossary.keys_for("se han debilitado")
+    assert "w:se han debilitado" in keys
+    assert "c:debilitado" in keys
+    assert "w:se" not in keys
 
 
 def test_lookup_finds_an_exact_form():
@@ -148,8 +162,11 @@ def test_compact_ships_only_whole_word_keys():
 def test_compact_entries_are_plain_json():
     glossary, _ = build()
     payload = glossary.compact()["w:pintan"]
-    assert set(payload) >= {"term", "gloss", "source"}
-    assert isinstance(payload["term"], str)
+    # A key maps to a list because two lessons can gloss the same form, and the
+    # browser picks the one from the lesson being read -- exactly as the server does.
+    assert isinstance(payload, list) and payload
+    assert set(payload[0]) >= {"term", "gloss", "source"}
+    assert isinstance(payload[0]["term"], str)
 
 
 def test_accumulating_rebuild_replaces_rather_than_merges():
@@ -222,3 +239,43 @@ def test_warming_failures_are_counted_not_raised():
         assert stats["pending"] == 0
     finally:
         warmer.stop()
+
+def test_a_derivation_is_not_answered_from_its_root():
+    """The corpus box says "profundizar / profundizando, profundiza (to deepen)". A
+    click on **profundamente** -- the adverb, in an article that does not gloss it --
+    was answered "to deepen", because all of those share the stem ``profun``. That is
+    a different word, and an instant wrong answer is worse than a slow right one: it
+    teaches the reader to distrust every instant lookup."""
+    with_verb = ARTICLE.replace(
+        "- **volverse** / **se vuelve, se volverá** (*to become*)",
+        "- **volverse** / **se vuelve, se volverá** (*to become*)\n"
+        "- **profundizar** / **profundizando, profundiza** (*to deepen*)")
+    glossary, _ = build(with_verb)
+    assert glossary.lookup("profundizar") is not None, "the word the lesson teaches"
+    assert glossary.lookup("profundiza") is not None, "an inflection of it"
+    assert glossary.lookup("profundizando") is not None, "and another"
+    # ...and the ones it does not: the shapes are what gives them away.
+    assert glossary.lookup("profundamente") is None, "the adverb is another word"
+    assert glossary.lookup("profundidad") is None, "so is the noun"
+
+
+def test_the_lesson_being_read_wins_over_another_lesson():
+    """The same form can be glossed differently by two lessons -- ``se vuelve`` is
+    *becomes* in one and part of ``se vuelve a estudiar`` in another -- and a click in
+    the second used to be answered with the first lesson's sense."""
+    from app.diglot import parse_article
+
+    # Different titles, because the slug comes from the title: two lessons with the
+    # same name are one lesson as far as the index is concerned.
+    one = parse_article(ARTICLE, fallback_slug="one")
+    other = parse_article(ARTICLE.replace("A Test Article", "Another Test Article")
+                                 .replace("(*to become*)", "(*to go back to studying*)"),
+                          fallback_slug="other")
+    glossary = Glossary().build([one, other], [])
+
+    assert glossary.lookup("se vuelve", article="a-test-article").gloss == "to become"
+    assert glossary.lookup("se vuelve", article="another-test-article").gloss == "to go back to studying"
+    # With no lesson named, the best-sourced entry stands -- first seen among equals.
+    assert glossary.lookup("se vuelve") is not None
+    # And the browser is sent both, so it can make the same choice the server would.
+    assert len(glossary.compact()["w:se vuelve"]) == 2

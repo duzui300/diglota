@@ -593,6 +593,72 @@ def test_prompt_lists_the_focus_vocabulary():
     assert "la cámara (the camera)" in weave_prompt(0.38)
 
 
+def _recording_chooser(payload: dict):
+    """A tutor that answers the chooser and keeps the prompt it was given."""
+    from app.tutor import Tutor as RealTutor
+
+    class Client:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def complete_json(self, prompt, **kwargs):
+            self.prompts.append(prompt)
+            return payload, None
+
+    class Wrapped(RealTutor):
+        pass
+
+    return Wrapped(Client())
+
+
+def test_the_focus_chooser_is_told_what_has_already_been_taught():
+    """Left to itself the chooser converged on the same handful of constructions for
+    every lesson. Naming what the shelf already teaches is what stops the third passage
+    in a row being built around darse cuenta de."""
+    from app import ingest, levels
+
+    tutor = _recording_chooser({"items": [{"es": "el río", "en": "the river"}]})
+    ingest.choose_focus_vocabulary(
+        tutor, title="A Test Article", text="El río es largo y ancho. " * 20,
+        level=levels.resolve_level("B1"),
+        already_taught=["darse cuenta de", "a lo largo de"])
+    prompt = tutor.client.prompts[0]
+    assert "already been taught these" in prompt
+    assert "- darse cuenta de" in prompt and "- a lo largo de" in prompt
+    assert "Do not choose any of them again" in prompt
+    # ...and it is still told what to choose instead, or it will reach for something
+    # obscure rather than what the passage is built around.
+    assert "this" in prompt and "passage actually uses" in prompt
+
+
+def test_a_fresh_shelf_says_nothing_about_what_is_taught():
+    """With no lessons behind it, an empty list would be a sentence about nothing --
+    and a prompt that says "do not repeat these" followed by nothing is worse than
+    silence."""
+    from app import ingest
+
+    tutor = _recording_chooser({"items": [{"es": "el río", "en": "the river"}]})
+    ingest.choose_focus_vocabulary(tutor, title="A Test Article",
+                                   text="El río es largo y ancho. " * 20, already_taught=[])
+    assert "already been taught" not in tutor.client.prompts[0]
+
+
+def test_the_anchor_writer_is_told_which_grammar_is_already_explained():
+    from app import ingest
+
+    tutor = _recording_chooser({
+        "vocab": [{"term": "el río", "gloss": "the river", "examples": ["El río es largo."]}],
+        "grammar": [{"title": "Ser and estar", "example": "El río es largo.", "explanation": "x"}],
+    })
+    ingest.build_anchors(tutor, title="A Test Article",
+                         woven="El río es largo. The river is long.",
+                         focus=[{"es": "el río", "en": "the river"}],
+                         already_explained=["Present Perfect", "The subjunctive"])
+    prompt = tutor.client.prompts[0]
+    assert "already been explained" in prompt
+    assert "- Present Perfect" in prompt and "- The subjunctive" in prompt
+
+
 def test_the_prompt_teaches_the_chosen_grain():
     """The dial has to reach the prompt, or the two forms produce the same text.
 

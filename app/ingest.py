@@ -33,7 +33,7 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from .diglot import parse_article, parse_spans
 from .fetch import (MIN_SOURCE_WORDS, MIN_WRITING_WORDS, FetchError, blocks_from_text,
@@ -132,7 +132,8 @@ def weave_cache_key(
 
 
 def choose_focus_vocabulary(
-    tutor: Tutor, *, title: str, text: str, count: int = 6, level: Level | None = None
+    tutor: Tutor, *, title: str, text: str, count: int = 6, level: Level | None = None,
+    already_taught: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
     """Pick the phrases the lesson will teach, before any weaving happens.
 
@@ -141,6 +142,12 @@ def choose_focus_vocabulary(
     The level matters here more than anywhere else: the same article yields
     "el sueño / dormir" for a beginner and "dar lugar a / se dio cuenta de" for
     someone ready for periphrases.
+
+    ``already_taught`` is what the reader's other lessons have already made the focus
+    vocabulary, and it is here because the chooser had no memory: it converged, and
+    every new lesson came back with *darse cuenta de* whether or not that passage had
+    anything to do with realising something. Each lesson should add something the
+    shelf does not already have.
     """
     level = level or resolve_level(None)
     level_rules = (
@@ -149,6 +156,24 @@ def choose_focus_vocabulary(
         if level.code != "auto" else
         f"Choose words and constructions at roughly the level of the article: {level.vocabulary}"
     )
+    # Named, not merely counted, so the model can see what it is being asked to avoid
+    # -- and capped, because a shelf of fifty lessons would otherwise push the article
+    # itself out of the prompt. How many were dropped is stated, because a silently
+    # shortened list reads as "that is everything they know".
+    taught = [item.strip() for item in (already_taught or []) if item and item.strip()]
+    avoid_block = ""
+    if taught:
+        unique = list(dict.fromkeys(taught))
+        listed = "\n".join(f"- {item}" for item in unique[:150])
+        more = f"\n(and {len(unique) - 150} more, also already taught)" if len(unique) > 150 else ""
+        avoid_block = f"""
+The reader has already been taught these -- they are in lessons they have, or in their
+own deck. Do not choose any of them again. Pick the words and constructions *this*
+passage actually uses that are not on the list: the point of a new lesson is that it
+adds something rather than teaching the same few phrases for the tenth time.
+
+{listed}{more}
+"""
     prompt = f"""You are choosing the vocabulary to teach in a diglot lesson built from this article.
 
 Title: {title}
@@ -156,12 +181,14 @@ Title: {title}
 ---
 {text[:5000]}
 ---
-
+{avoid_block}
 Choose exactly {count} Spanish words or short phrases that:
 - recur naturally in a text like this, so they can appear several times;
 - are useful to an English speaker who reads but does not yet write Spanish;
 - include at least two multi-word constructions (a periphrastic verb, a
   conjunctive phrase, a reflexive verb) rather than only single nouns.
+- appear in the text above: pick what this passage actually says, not what a text
+  like it might say.
 
 {level_rules}
 Do not repeat what is essentially the same item twice: if you choose
@@ -648,12 +675,29 @@ def _chunk_pieces(pieces: list[tuple[str, str]], max_words: int = CHUNK_WORDS
 # --------------------------------------------------------------------------- #
 
 
-def build_anchors(tutor: Tutor, *, title: str, woven: str, focus: list[dict[str, str]]) -> tuple[list[dict], list[dict]]:
+def build_anchors(tutor: Tutor, *, title: str, woven: str, focus: list[dict[str, str]],
+                  already_explained: Sequence[str] | None = None) -> tuple[list[dict], list[dict]]:
     """Generate the post-reading Recycled Vocabulary Box and Grammar Breakdown.
 
     Quoting the *woven* text back, not the source, is deliberate: the examples
     have to be sentences the learner has actually read.
+
+    ``already_explained`` names the grammar the reader's other lessons have already
+    broken down, for the same reason the focus chooser is told what it taught: left
+    to itself it returns a good general note about this kind of prose every time, and
+    the reader meets the same three explanations in every lesson.
     """
+    taught = [item.strip() for item in (already_explained or []) if item and item.strip()]
+    avoid_block = ""
+    if taught:
+        listed = "\n".join(f"- {item}" for item in list(dict.fromkeys(taught))[:80])
+        avoid_block = f"""
+These constructions have already been explained in the reader's other lessons. Do not
+write about them again unless this lesson is genuinely the clearest place to meet them:
+pick the grammar this passage actually exercises that is not on this list.
+
+{listed}
+"""
     prompt = f"""Here is a diglot lesson -- English prose with Spanish woven into it -- that a learner has just read.
 
 Title: {title}
@@ -661,7 +705,7 @@ Title: {title}
 ---
 {woven[:6000]}
 ---
-
+{avoid_block}
 The lesson was built around these focus items:
 {chr(10).join(f"- {i['es']} ({i.get('en','')})" for i in focus)}
 
@@ -673,7 +717,7 @@ Produce the post-reading anchors.
 2. "grammar": exactly 3 notes on the grammar the lesson actually exercises.
    Each note names a construction, quotes a real sentence from the lesson, and
    explains in 2-4 sentences of English why it works that way and what a learner
-   gets wrong about it.
+   gets wrong about it. The sentence quoted must be in the lesson text above.
 
 Return JSON:
 {{
@@ -864,6 +908,8 @@ def import_writing(
     ratio: float | None = None,
     weave: "Weave | str | None" = None,
     cache: Any = None,
+    already_taught: Sequence[str] | None = None,
+    already_explained: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Turn something the reader wrote into a lesson, in whatever language.
 
@@ -891,6 +937,7 @@ def import_writing(
                       else f"your own writing, written in {language}"),
         source_id=f"writing:{hashlib.sha1(text.encode('utf-8')).hexdigest()}",
         min_words=MIN_WRITING_WORDS,
+        already_taught=already_taught, already_explained=already_explained,
     )
     report["notes"] = notes + report["notes"]
     report["source_language"] = language
@@ -914,6 +961,8 @@ def import_article(
     source_label: str | None = None,
     source_id: str | None = None,
     min_words: int = MIN_SOURCE_WORDS,
+    already_taught: Sequence[str] | None = None,
+    already_explained: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Fetch, extract, weave and shelve one article. Returns a report.
 
@@ -997,7 +1046,8 @@ def import_article(
     total_units = len(groups) + 3
     progress.step(f"Choosing the vocabulary to teach ({len(groups)} passages to weave)",
                   done=2, total=total_units)
-    focus = choose_focus_vocabulary(tutor, title=title, text=whole, level=requested_level)
+    focus = choose_focus_vocabulary(tutor, title=title, text=whole, level=requested_level,
+                                    already_taught=already_taught)
     level: str | None = requested_level.code if requested_level.code != "auto" else None
     register: str | None = None
 
@@ -1091,7 +1141,8 @@ def import_article(
     # this last step should not throw away eight minutes of work. So the
     # anchors degrade to empty and the article is written anyway.
     try:
-        vocab, grammar = build_anchors(tutor, title=title, woven=woven_text, focus=focus)
+        vocab, grammar = build_anchors(tutor, title=title, woven=woven_text, focus=focus,
+                                       already_explained=already_explained)
     except Exception as exc:
         notes.append(f"post-reading notes could not be generated: {type(exc).__name__}: {exc}")
         vocab, grammar = [], []

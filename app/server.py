@@ -278,7 +278,7 @@ class App:
             return self._from_cache(term, hit)
 
         glossary = self.ensure_glossary()
-        entry = glossary.lookup(term)
+        entry = glossary.lookup(term, article=slug)
         if entry is not None:
             return {"term": term, **entry.to_dict(), "instant": True, "model": False}
 
@@ -330,6 +330,36 @@ class App:
 
     # -- background jobs --------------------------------------------------- #
 
+    def already_taught(self, *, exclude: str | None = None) -> dict[str, list[str]]:
+        """What the reader's shelf has already taught, for the next lesson to avoid.
+
+        The focus items and grammar titles of every lesson they have, plus the words in
+        their deck -- the same statement made by the reader rather than by a lesson.
+
+        This exists because the chooser had no memory. Left to itself it converged: every
+        new passage came back teaching ``darse cuenta de``, whether or not it had
+        anything to do with realising something, and every lesson explained the same
+        three points about this kind of prose. A shelf should accumulate, and it cannot
+        accumulate if each lesson is chosen as though the others did not exist.
+
+        ``exclude`` is the lesson being re-imported, so a re-weave is not told that it
+        is already taught by itself.
+        """
+        vocab: list[str] = []
+        grammar: list[str] = []
+        for entry in self.library.all():
+            if exclude and entry.article.slug == exclude:
+                continue
+            # The lesson's own vocabulary box, not every bolded phrase in its body. The
+            # box says what the lesson *teaches*; the bolding is markup, and harvesting
+            # it gave 810 "already taught" items across 29 lessons, most of them
+            # sentence fragments ("es fundamental para", "ya que revela") that buried
+            # the 127 real ones -- and a list nobody can act on is not a memory.
+            vocab += [anchor.term for anchor in entry.article.vocab if anchor.term]
+            grammar += [note.title for note in entry.article.grammar if note.title]
+        saved = [row.get("term") or "" for row in self.store.list_words(limit=2000)]
+        return {"taught": vocab + [term for term in saved if term], "explained": grammar}
+
     def start_import(self, url: str | None, title_hint: str | None,
                      level: str | None = None, ratio: float | None = None,
                      weave: str | None = None, text: str | None = None,
@@ -341,10 +371,12 @@ class App:
         amount = clamp_ratio(ratio, chosen)
 
         def work(progress):
+            known = self.already_taught()
             result = import_article(
                 url=url, settings=self.settings, tutor=self.tutor, title_hint=title_hint,
                 judge=self.judge, progress=progress, level_code=chosen.code, ratio=amount,
                 weave=grain, cache=self.weave_cache, text=text, source_url=source_url,
+                already_taught=known["taught"], already_explained=known["explained"],
             )
             self.library.refresh()
             return result
@@ -367,10 +399,12 @@ class App:
         amount = clamp_ratio(ratio, chosen)
 
         def work(progress):
+            known = self.already_taught()
             result = import_writing(
                 text=text, settings=self.settings, tutor=self.tutor, title=title,
                 judge=self.judge, progress=progress, level_code=chosen.code, ratio=amount,
                 weave=grain, cache=self.weave_cache,
+                already_taught=known["taught"], already_explained=known["explained"],
             )
             self.library.refresh()
             return result
@@ -1999,7 +2033,9 @@ def start_recommend() -> dict[str, Any]:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # Revalidated for the same reason as the files it loads: the page and the script
+    # it points at have to be able to change without anyone being told to hard-reload.
+    return FileResponse(STATIC_DIR / "index.html", headers={"cache-control": "no-cache"})
 
 
 @app.exception_handler(LLMError)
@@ -2007,4 +2043,23 @@ def llm_error_handler(_request, exc: LLMError) -> JSONResponse:  # pragma: no co
     return JSONResponse({"detail": str(exc)}, status_code=502)
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _RevalidatingStatic(StaticFiles):
+    """Static files the browser must ask about before reusing.
+
+    Not a micro-optimisation to avoid: served with only ``Last-Modified`` and an
+    ETag, a browser applies *heuristic* caching, and for a file touched eight hours
+    ago that can hold a stale ``app.js`` for the better part of an hour. The symptom
+    is a feature that is running on the server and simply absent from the page, which
+    is what happened to the library search -- the code was there, the browser was
+    not asking. ``no-cache`` means "revalidate before you use the copy you have": the
+    answer is a cheap 304 whenever nothing has changed, and the current file the
+    moment it has.
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:  # type: ignore[no-untyped-def]
+        response = super().file_response(*args, **kwargs)
+        response.headers["cache-control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")

@@ -498,6 +498,41 @@ def test_quitting_says_so_when_nothing_can_stop_the_app(monkeypatch):
     assert caught.value.status_code == 501
 
 
+# ------------------------------------------------------- what has been taught --
+
+
+def test_the_shelf_tells_the_next_lesson_what_it_has_taught(server):
+    """The chooser had no memory, so it converged: every new passage came back teaching
+    *darse cuenta de*, whether or not it had anything to do with realising something,
+    and every lesson explained the same points. What the shelf already teaches is now
+    handed to the chooser so a new lesson can add something."""
+    # The lesson's vocabulary box, which is what it *teaches* -- not every bolded
+    # phrase in its body, which is markup.
+    taught = server.already_taught()
+    assert any("volverse" in item for item in taught["taught"]), taught
+
+    # The reader's own deck counts as met as well: they saved it.
+    server.store.add_word(term="el genoma", lemma="genoma", gloss="the genome")
+    assert "el genoma" in server.already_taught()["taught"]
+
+    # And a lesson being re-imported is not told about itself.
+    assert not any("volverse" in item
+                   for item in server.already_taught(exclude="a-test-article")["taught"])
+
+
+def test_explained_grammar_is_collected_from_other_lessons(server):
+    folder = server.settings.library_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "with-grammar.md").write_text(
+        CORPUS_ARTICLE.replace("A Test Article", "A Lesson With Grammar") + """
+**Grammar Breakdown**
+
+1. **Present Perfect:** the compound past, used for what still bears on now.
+""", encoding="utf-8")
+    server.library.refresh()
+    assert "Present Perfect" in server.already_taught()["explained"]
+
+
 # ---------------------------------------------------------------- settings --
 
 

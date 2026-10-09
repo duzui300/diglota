@@ -761,19 +761,30 @@ def run(page: Page, *, with_ai: bool) -> None:
           after_save["llm"]["from"] == ("app" if settings_api["llm"]["ready"] else after_save["llm"]["from"]),
           str(after_save["llm"]["from"]))
 
-    # ...and forget it, so the app is left reading its .env again, as it was found.
+    # Leave the app configured the way it was found. Which way that is depends on where
+    # the values came from, and this check used to get it wrong: it always cleared, which
+    # is the right restore when the values came from the environment and the wrong one
+    # when the reader had set them here -- clearing then *changed* their model, which is
+    # exactly what a check must never do to real settings.
     page.locator("#btn-settings").click()
-    page.wait_for_selector("#settings-clear", timeout=15000)
-    page.locator("#settings-clear").click()
-    page.wait_for_timeout(1500)
-    restored_settings = page.request.get(f"{BASE}/api/settings").json()
-    check("forgetting hands the values back to the environment",
-          restored_settings["llm"]["ready"] == settings_api["llm"]["ready"]
-          and restored_settings["llm"]["base_url"] == settings_api["llm"]["base_url"],
-          f"{restored_settings['llm']}")
-    check("and the app is left as it was found",
-          restored_settings["llm"]["model"] == settings_api["llm"]["model"],
-          f"{restored_settings['llm']['model']!r} vs {settings_api['llm']['model']!r}")
+    page.wait_for_selector("#settings-save", timeout=15000)
+    if settings_api["llm"]["from"] == "app":
+        page.locator("#settings-save").click()          # the same values, written back
+        page.wait_for_timeout(1500)
+        check("a setting the reader made is left in place",
+              page.request.get(f"{BASE}/api/settings").json()["llm"] == settings_api["llm"],
+              str(page.request.get(f"{BASE}/api/settings").json()["llm"]))
+    else:
+        page.locator("#settings-clear").click()
+        page.wait_for_timeout(1500)
+        restored_settings = page.request.get(f"{BASE}/api/settings").json()
+        check("forgetting hands the values back to the environment",
+              restored_settings["llm"]["ready"] == settings_api["llm"]["ready"]
+              and restored_settings["llm"]["base_url"] == settings_api["llm"]["base_url"],
+              f"{restored_settings['llm']}")
+        check("and the app is left as it was found",
+              restored_settings["llm"]["model"] == settings_api["llm"]["model"],
+              f"{restored_settings['llm']['model']!r} vs {settings_api['llm']['model']!r}")
 
     # The vocabulary-driven search now lives inside Discover rather than in a dialog
     # of its own: one place to look for something to read, reached two ways.
@@ -1751,6 +1762,15 @@ def run(page: Page, *, with_ai: bool) -> None:
 
     total = page.locator(".card").count()
     check("the shelf offers a search box", page.locator("#library-search").count() == 1)
+
+    # Why this is checked here: the search was in the running app and missing from the
+    # page, because static files were served with only Last-Modified and the browser
+    # heuristically cached app.js. A feature that is on the server and absent from the
+    # screen is the worst kind of missing, so the header that prevents it is pinned.
+    asset = page.request.get(f"{BASE}/static/app.js")
+    check("the app tells the browser to revalidate its own files",
+          asset.headers.get("cache-control") == "no-cache",
+          str(asset.headers.get("cache-control")))
 
     titles = page.eval_on_selector_all(".card h3", "els => els.map(e => e.textContent.trim())")
     needle = next((t.split()[0] for t in titles if len(t.split()[0]) > 4), "")

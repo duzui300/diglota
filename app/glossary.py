@@ -40,6 +40,35 @@ _STOP = frozenset(
     estar está están ni no sí si te os nos me más menos muy ya""".split()
 )
 
+# Endings that *build* a word rather than inflect one: ``profundamente`` and
+# ``profundidad`` are not forms of ``profundizar``, they are different words on the
+# same root -- and all four share the stem ``profun``, so the stem key alone cannot
+# tell them apart.
+#
+# That is how clicking the adverb ``profundamente`` came back with "to deepen", from
+# the lesson's entry for the verb. It looked authoritative: instant, no model call,
+# nothing saying it was a guess. A reader who hits two of those stops trusting the
+# instant lookups altogether, which is worse than the lookup being slow.
+#
+# A blocklist rather than a grammar of Spanish inflection, deliberately: the cost of
+# a miss here is one model call, and the cost of a false match is a wrong meaning
+# presented as fact.
+_DERIVED_SUFFIXES = (
+    "mente",                                     # adverbs: profundamente, claramente
+    "idad", "edad", "dad",                       # nouns: profundidad, soledad
+    "cion", "sion", "zon",                       # nouns: conexion, decision
+    "miento", "mientos",                         # nouns: sentimiento
+    "oso", "osa", "osos", "osas",                # adjectives: peligroso
+    "ivo", "iva", "ivos", "ivas",                # adjectives: comprensivo
+    "able", "ables", "ible", "ibles",            # adjectives: disponible
+    "ancia", "encia",                            # nouns: importancia, paciencia
+    "eza", "ura",                                # nouns: firmeza, cordura
+    "ismo", "ista",                              # nouns: realismo, artista
+    "isimo", "isima",                            # superlatives: altisimo
+    "ito", "ita", "illo", "illa",                # diminutives
+    "ador", "adora", "edor", "ente", "ante",     # agent nouns and participles
+)
+
 # Everything a learner will click constantly and never want to study. Exported
 # so other parts of the app can ask the same question -- the "words you keep
 # looking up" list was offering to save "del" and "a", because those *are* what
@@ -108,7 +137,16 @@ class Entry:
 class Glossary:
     """A lookup index over the corpus and the learner's deck."""
 
-    entries: dict[str, Entry] = field(default_factory=dict)
+    # key -> every entry that claims it, best-sourced first.
+    #
+    # A key can have more than one answer, and for the whole-word keys that matters:
+    # two lessons gloss the same form differently -- ``se vuelve`` is *becomes* in one
+    # and part of ``se vuelve a estudiar`` in another -- so a click in the second
+    # lesson used to be answered with the first lesson's sense. Keeping the candidates
+    # and ranking them at read time lets the lesson being read win, which is the same
+    # argument as the inflection check: the lookup has to be right about *this* word in
+    # *this* passage, or the reader learns to distrust it.
+    entries: dict[str, list["Entry"]] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # -- indexing --------------------------------------------------------- #
@@ -125,7 +163,13 @@ class Glossary:
             return []
         keys = [f"w:{fold(term)}"]
         head = head_word(term)
-        if head and fold(head) != fold(term):
+        # Only when the head is a word worth keying on. For a Spanish phrase the first
+        # word is often a clitic -- the head of "se vuelve" is "se" -- and keying entries
+        # under it made seventeen reflexive phrases in this library candidates for each
+        # other: a click on "se vuelve" could be answered with whichever lesson's
+        # "se han debilitado" ranked first, which is how it came back as "to weaken".
+        # The content-word key below is the one that was wanted.
+        if head and fold(head) != fold(term) and fold(head) not in STOPWORDS:
             keys.append(f"w:{fold(head)}")
         content = content_word(term)
         if content:
@@ -140,10 +184,14 @@ class Glossary:
         if not entry.gloss or not entry.term:
             return
         for key in self.keys_for(entry.term):
-            existing = self.entries.get(key)
-            # Keep the best-sourced entry for a key; ties go to the first seen.
-            if existing is None or _SOURCE_RANK.get(entry.source, 9) < _SOURCE_RANK.get(existing.source, 9):
-                self.entries[key] = entry
+            bucket = self.entries.setdefault(key, [])
+            if any(same.term == entry.term and same.gloss == entry.gloss
+                   and same.article == entry.article for same in bucket):
+                continue
+            bucket.append(entry)
+            # Best source first, so a reader of this dataclass can take [0] and get
+            # what they would have got before there was a list at all.
+            bucket.sort(key=lambda item: _SOURCE_RANK.get(item.source, 9))
 
     # -- building --------------------------------------------------------- #
 
@@ -217,19 +265,41 @@ class Glossary:
 
     # -- lookup ----------------------------------------------------------- #
 
-    def lookup(self, term: str) -> Entry | None:
+    def lookup(self, term: str, *, article: str | None = None) -> Entry | None:
+        """The lesson's own translation of a word, or ``None``.
+
+        The stem key is what lets a click on ``vuelve`` reach the ``volverse`` entry,
+        and it is also how a click on ``profundamente`` reached the ``profundizar``
+        entry and was told "to deepen". So a stem hit is checked against the entry it
+        found: inflections answer, derivations do not, and a word the lesson does not
+        translate falls through to the model -- an instant wrong answer is worse than
+        a slow right one.
+
+        ``article`` is the passage being read, and an entry from it wins over an equally
+        good entry from somewhere else. A form can be glossed differently by two
+        lessons, and the reader wants the one in front of them.
+        """
         with self._lock:
             for key in self.keys_for(term):
-                entry = self.entries.get(key)
-                if entry is not None:
-                    return entry
+                bucket = self.entries.get(key)
+                if not bucket:
+                    continue
+                if key.startswith("s:"):
+                    bucket = [entry for entry in bucket if is_inflection(term, entry.term)]
+                    if not bucket:
+                        continue
+                if article:
+                    here = [entry for entry in bucket if entry.article == article]
+                    if here:
+                        return here[0]
+                return bucket[0]
         return None
 
     def __len__(self) -> int:
         with self._lock:
-            return len({id(entry) for entry in self.entries.values()})
+            return len({id(entry) for bucket in self.entries.values() for entry in bucket})
 
-    def compact(self) -> dict[str, dict[str, Any]]:
+    def compact(self) -> dict[str, list[dict[str, Any]]]:
         """The index in a form the browser can search, for instant local lookups.
 
         Only whole-word keys are sent. Stem keys would be dead weight: the
@@ -237,11 +307,16 @@ class Glossary:
         and a reader only ever clicks a word as the article wrote it. The server
         still consults stems, so a click that misses locally costs one very fast
         round trip rather than a model call.
+
+        Each key carries *every* entry that claims it, not just the best one, so the
+        browser can prefer the lesson being read exactly as the server does. Two
+        lessons rarely disagree about a word, and when they do the reader is looking at
+        one of them.
         """
         with self._lock:
             return {
-                key: entry.to_dict()
-                for key, entry in self.entries.items()
+                key: [entry.to_dict() for entry in bucket]
+                for key, bucket in self.entries.items()
                 if key.startswith("w:")
             }
 
@@ -250,3 +325,33 @@ def normalise(text: str) -> str:
     """Lowercase and strip accents -- exposed for callers doing their own keys."""
     decomposed = unicodedata.normalize("NFD", text.lower())
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+def is_inflection(form: str, term: str) -> bool:
+    """Whether a stem match is the same word in another form.
+
+    Shape, not grammar: a verb's person and tense endings pass, a nominal or
+    adjectival ending passes, and an ending that *builds* a different word does not.
+    ``profundiza`` is a form of ``profundizar``; ``profundamente`` is not.
+
+    Two cases are left deliberately unresolved because the shape cannot decide them:
+    ``profundo`` is both an adjective in its own right and the first person singular
+    of ``profundizar``, and the ending ``-o`` is a legitimate one for both. Answering
+    from the stem there is a coin flip, and it is the sort of coin flip this function
+    exists to stop making -- but it is caught only when the ending gives it away.
+
+    A miss costs one model call. A false match costs a wrong meaning shown as fact,
+    which is why the list is of endings rather than a promise of coverage.
+    """
+    f, t = fold(form).strip(), fold(term).strip()
+    if not f or not t or f == t:
+        return f == t
+    if t.startswith(f) or f.startswith(t):
+        # One is the other with something glued on: "darse" for "darse cuenta de".
+        return True
+    if f.endswith(t):
+        return True
+    for suffix in _DERIVED_SUFFIXES:
+        if f.endswith(suffix) and not t.endswith(suffix):
+            return False
+    return True

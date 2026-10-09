@@ -39,9 +39,13 @@ async function ensureGlossary() {
   return glossaryLoading;
 }
 
-function localEntry(term) {
-  if (!glossaryIndex) return null;
-  return glossaryIndex[`w:${fold(term)}`] || null;
+function localEntry(term, slug) {
+  const candidates = glossaryIndex ? glossaryIndex[`w:${fold(term)}`] : null;
+  if (!candidates || !candidates.length) return null;
+  // The lesson being read wins, as it does on the server: a form can be glossed
+  // differently by two lessons, and answering with the other one's sense is the same
+  // failure as answering with the wrong word.
+  return candidates.find(entry => entry.article && entry.article === slug) || candidates[0];
 }
 
 /* ---------------------------------------------------------------- api ----- */
@@ -780,7 +784,7 @@ async function lookupWord(word, sentence, slug, anchor, savedTerm, options = {})
   // offers the fuller tutor entry -- but the reader is not made to wait for it.
   // Skipped on a deliberate deep lookup, where the reader has already asked for
   // the slower answer and a flash of the short one would just be noise.
-  const local = deep ? null : localEntry(word);
+  const local = deep ? null : localEntry(word, slug);
   if (local) {
     paintEntry(local, { word, sentence, slug, anchor, savedTerm, provisional: true });
     placePopover(anchor);
