@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en" data-theme="__THEME__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diglota</title>
+<style>
+  /* The reader's own tokens, copied rather than linked: at this moment the app
+     that serves the stylesheet is not running yet. Three themes, same values as
+     packages/ui/static/style.css, so the hand-over is invisible. */
+  :root[data-theme="paper"] {
+    --page: #f4efe6; --surface: #fdfbf7; --ink: #211d18; --ink-2: #5c554b;
+    --ink-3: #8b8375; --es: #235e58; --accent: #1f8f6d; --accent-ink: #166f55;
+    --line: #e2d9c9; --es-wash: rgba(35, 94, 88, .07);
+  }
+  :root[data-theme="sepia"] {
+    --page: #ece0c8; --surface: #f8f0dd; --ink: #2a2216; --ink-2: #6a5c42;
+    --ink-3: #94856a; --es: #1d534d; --accent: #1a8266; --accent-ink: #136049;
+    --line: #ddcfae; --es-wash: rgba(29, 83, 77, .08);
+  }
+  :root[data-theme="night"] {
+    --page: #0f1114; --surface: #15181c; --ink: #e9e6df; --ink-2: #a8a49a;
+    --ink-3: #74716a; --es: #7fc9b4; --accent: #2ea07f; --accent-ink: #3fbf9a;
+    --line: #2a2f36; --es-wash: rgba(127, 201, 180, .08);
+  }
+
+  :root {
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: var(--sans);
+    -webkit-user-select: none; user-select: none;
+  }
+
+  .splash {
+    min-height: 100vh; padding: 38px 46px 34px;
+    display: flex; flex-direction: column;
+  }
+
+  .brand {
+    font-family: var(--serif); font-size: 26px; font-weight: 600;
+    letter-spacing: -0.01em; line-height: 1; color: var(--ink);
+  }
+
+  /* The sentence sits in the optical middle of the window, not the geometric
+     one: brand above and status below are both small, so dead centre would read
+     low. The padding-bottom is the correction. */
+  .stage {
+    flex: 1; display: flex; flex-direction: column; justify-content: center;
+    padding-bottom: 5vh;
+  }
+
+  .weave {
+    margin: 0; max-width: 34ch;
+    font-family: var(--serif); font-size: 21px; line-height: 1.68;
+    font-weight: 400; color: var(--ink);
+  }
+  .weave .es {
+    color: var(--es); border-radius: 3px;
+    transition: background-color .26s ease;
+  }
+  .weave .gloss {
+    display: none; color: var(--ink-3); font-style: italic; font-size: .86em;
+  }
+  body.ready .weave .es { background: var(--es-wash); }
+  body.ready .weave .gloss { display: inline; animation: arrive .28s ease both; }
+
+  @keyframes arrive {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  .foot { min-height: 20px; }
+  .status {
+    margin: 0; font-size: 12.5px; line-height: 1.4; color: var(--ink-3);
+  }
+
+  /* -- the failure state ------------------------------------------------ */
+  .failure { display: none; max-width: 48ch; }
+  body.failed .weave { display: none; }
+  body.failed .failure { display: block; }
+  body.failed .status { display: none; }
+
+  .failure h1 {
+    margin: 0 0 10px; font-family: var(--serif); font-size: 21px;
+    font-weight: 600; line-height: 1.35; color: var(--ink);
+  }
+  .failure p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink-2); }
+  .failure .reason {
+    color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 11px; font-family: var(--mono);
+    font-size: 12px; line-height: 1.5; word-break: break-word;
+    -webkit-user-select: text; user-select: text;
+  }
+  .failure .where { font-size: 12.5px; color: var(--ink-3); }
+  .failure .where code { font-family: var(--mono); font-size: 11.5px; }
+
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 8px 14px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--ink); cursor: pointer;
+    font-family: var(--sans); font-size: 14px; font-weight: 540;
+    transition: background .12s ease, border-color .12s ease, transform .06s ease;
+  }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+  .btn.ghost:hover { background: var(--surface); color: var(--ink); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .weave .es, .btn { transition: none; }
+    body.ready .weave .gloss { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <main class="splash">
+    <div class="brand">Diglota</div>
+
+    <div class="stage">
+      <p class="weave">Reading is different because <span class="es">pone cada palabra en el medio de algo</span><span class="gloss"> (*it puts every word in the middle of something*)</span>.</p>
+
+      <section class="failure" role="alert">
+        <h1>The reader did not start.</h1>
+        <p class="reason" id="reason">No reason was reported.</p>
+        <p class="where">Details are in <code id="log">data/desktop.log</code>.</p>
+        <div class="actions">
+          <button class="btn primary" id="retry" type="button">Try again</button>
+          <button class="btn ghost" id="quit" type="button">Quit</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="foot">
+      <p class="status" id="status" role="status">Starting the reader</p>
+    </div>
+  </main>
+
+<script>
+  (function () {
+    const body = document.body;
+    const statusLine = document.getElementById("status");
+    const reason = document.getElementById("reason");
+    const logLine = document.getElementById("log");
+
+    function api(name) {
+      const bridge = window.pywebview && window.pywebview.api;
+      if (!bridge) { return; }
+      bridge[name]().catch(function () {});
+    }
+
+    document.getElementById("retry").addEventListener("click", function () {
+      body.classList.remove("failed");
+      statusLine.textContent = "Starting the reader";
+      api("retry");
+    });
+    document.getElementById("quit").addEventListener("click", function () {
+      api("quit");
+    });
+
+    window.diglota = {
+      // Called only when the engine has actually answered; the gloss is the
+      // dictionary waking up, not a timer.
+      ready: function () {
+        body.classList.add("ready");
+        statusLine.textContent = "Ready";
+      },
+      fail: function (message, logPath) {
+        body.classList.add("failed");
+        reason.textContent = message || "No reason was reported.";
+        if (logPath) { logLine.textContent = logPath; }
+      }
+    };
+  }());
+</script>
+</body>
+</html>

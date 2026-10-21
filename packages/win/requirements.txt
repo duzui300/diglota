@@ -1,0 +1,12 @@
+# The desktop shell. The engine's own dependencies are in the root
+# requirements.txt -- install both.
+#
+#   pip install -r requirements.txt -r packages/win/requirements.txt
+
+# The window. On Windows this drives the system's Edge WebView2 runtime, which
+# Windows 11 ships with; pythonnet comes with it.
+pywebview>=6.0
+
+# Build only: `python packages/win/build.py` freezes the app into a folder with
+# Diglota.exe. Not needed to run it from source.
+pyinstaller>=6.10

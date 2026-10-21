@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import analytics, challenges, corpus, ingest, registers, transfer, vocab, writing
-from .config import Settings
+from .config import STATIC_DIR, Settings
 from .diglot import Article, content_fingerprint
 from .glossary import STOPWORDS, Glossary
 from .grading import Grading, is_correct, is_provisional, may_fail
@@ -54,7 +54,6 @@ from .tutor import Tutor, cache_key
 from .warm import GlossWarmer
 
 log = logging.getLogger("diglot")
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 # How long a failed lookup is remembered. Long enough that repeatedly clicking
 # a word during an outage is cheap, short enough that the app heals itself once

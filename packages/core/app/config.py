@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,9 +28,33 @@ log = logging.getLogger("diglot")
 # comes from the environment alone.
 PANEL_KEYS = ("llm_base_url", "llm_api_key", "llm_model", "typesafe_api_key", "typesafe_model")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+def _workspace_root() -> Path:
+    """Where the reader's own things live: ``data/``, ``corpus/``, ``.env``.
 
-# Where the diglot articles live. ``corpus/`` inside the project by default, so a
+    Two layouts reach this file. In a checkout it is
+    ``<root>/packages/core/app/config.py``, so the root is three parents up. In a
+    packaged desktop build the source sits inside the bundle but the reader's
+    database must not: ``data/`` belongs next to the executable, where it is
+    writable and visible, not inside PyInstaller's extraction directory. The
+    frozen check is therefore about *writes*, not about resources -- those are
+    found through :data:`BUNDLE_ROOT` instead.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[3]
+
+
+PROJECT_ROOT = _workspace_root()
+
+# Read-only resources that ship with the app -- the web UI. In a checkout that is
+# the repository itself; frozen, PyInstaller has unpacked the same tree under
+# ``sys._MEIPASS``. Keeping the two roots apart is what lets an installed copy keep
+# its ``data/`` beside the .exe while still finding its own HTML.
+BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
+UI_DIR = BUNDLE_ROOT / "packages" / "ui" / "static"
+STATIC_DIR = UI_DIR
+
+# Where the diglot articles live. ``corpus/`` beside the project by default, so a
 # fresh clone has somewhere obvious to put them, and ``DIGLOT_CORPUS`` moves it --
 # the corpus is the reader's own shelf of hand-made lessons and is not shipped with
 # the app. The app runs perfectly well with none: import a link and it writes a

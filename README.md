@@ -1,81 +1,114 @@
 # Diglota
 
 <p align="center">
-  <strong>A reading-first, dual-language learning platform for mastering Spanish in context.</strong>
+  <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+" /></a>
+  <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" /></a>
+  <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/platform-Web%20%7C%20Windows-lightgrey" alt="Platform: Web and Windows" /></a>
+  <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" /></a>
+  <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/AI-Optional%20%7C%20Local--First-black" alt="Optional AI" /></a>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
-  <img src="https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
-  <img src="https://img.shields.io/badge/frontend-Zero--Build%20Vanilla%20JS-F7DF1E?logo=javascript&logoColor=black" alt="Vanilla JS" />
-  <img src="https://img.shields.io/badge/AI-Optional%20%7C%20Local--First-black" alt="Optional AI" />
-  <img src="https://img.shields.io/badge/tests-540%20passing-success" alt="Tests" />
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" />
-</p>
+Diglota is a reading-first app for learning Spanish through English by the diglot weave, in which Spanish phrases carrying short English glosses are set into English prose. It is built for independent learners at any level: the reading interface, morphological dictionary lookups, vocabulary coverage metrics and spaced repetition all run offline, with no account and no API key.
+
+As you read, click any Spanish word for an instant lemma, tense and usage entry; save words to meet them again in spaced repetition inside the exact sentences where you found them; and, if you want more, connect AI models — TypeSafe Jev for semantic grading, or any OpenAI-compatible chat model for tutoring and lesson synthesis.
+
+![The Diglota desktop app](assets/desktop.png)
 
 ---
 
-Diglota is designed around the **diglot method**: weaving authentic Spanish into English prose. English carries the narrative arc while Spanish phrases introduce target vocabulary, complete with English glosses and bolded focus forms.
+## What's New in 1.0.0
 
-Instead of rote memorization or artificial flashcards, Diglota transforms authentic reading into an active acquisition engine:
-- **Instant Morphological Lookups:** Click any Spanish word to see its base lemma, conjugated form, usage notes, and common pitfalls.
-- **Contextual Spaced Repetition (SM-2):** Saved words return inside the exact sentences you first encountered them in.
-- **Semantic Translation Grading:** AI-driven evaluation that grades exercises on *meaning and nuance* rather than brittle string matching.
-- **Autonomous Lesson Generation:** Turn any web article or personal writing into a calibrated, leveled diglot reading with automated vocabulary recycling and grammar breakdowns.
-
-![The Diglota Library](assets/library.png)
+- **Native Windows window.** Diglota now runs as a dedicated desktop app through pywebview and Edge WebView2. The FastAPI engine runs in-process on an OS-assigned loopback port, so it cannot collide with a web copy, and the window remembers its geometry and the reader's state.
+- **One-file installer.** `Diglota-Setup-1.0.0.exe` installs directly beside itself. It needs no administrator rights, creates no hidden copy in `%LOCALAPPDATA%`, and keeps your lessons and reading history when you update — and, by default, when you uninstall.
+- **Monorepo architecture.** One engine now serves the web app, the command line and the desktop window: `packages/core`, `packages/ui`, `packages/web` and `packages/win`.
+- **580 automated tests.** Forty desktop and setup tests join the 540 engine tests; `python -m pytest -q` passes all 580.
 
 ---
 
-## ⚡ Quick Start
+## Three Ways to Run
 
-### 1. Requirements
+Diglota offers two desktop approaches on Windows, plus a cross-platform web server for every operating system.
 
-- **Python 3.10+** (Nothing compiled, no external runtimes required)
-- **Minimal Dependencies**:
-  ```bash
-  pip install -r requirements.txt
-  ```
-  *Runtime stack:* `fastapi`, `uvicorn[standard]`, `python-dotenv`, and optionally `typesafe-sdk`. No external database server to run (embedded SQLite) and zero frontend build pipelines (`static/` is pure native web code).
+### 1. One-File Windows Installer (Recommended on Windows)
 
-### 2. Launch
+The simplest way to use Diglota on Windows 10 or 11. The desktop app needs the WebView2 runtime; Windows 11 includes it by default.
 
-#### Windows (Zero-Console Desktop Mode)
-**Double-click `Open Diglot.vbs`.**  
-Launches the background server via `pythonw` with zero flickering terminal windows, waits for the server to become healthy, and opens the app in your default browser. Application logs are written to `data/app.log`.
+1. Download or build `Diglota-Setup-1.0.0.exe`.
+2. Move the setup file to the folder where Diglota should live — for example, `D:\Apps\Diglota`.
+3. Run the installer. It installs **beside itself**, in that folder — no administrator permissions, and no scattered files in `%LOCALAPPDATA%`.
+4. The setup window shows the install path before copying anything, offers **Change…** to pick another folder, and counts the files as it goes.
+5. Setup creates a Start menu shortcut, an optional desktop shortcut, and an entry in Windows *Settings → Apps*.
 
-#### Cross-Platform / Command Line
+![The Diglota setup window](assets/installer.png)
+
+> **Updating and uninstalling.** To update, run the setup program again in the install folder; your database (`data/`) and lessons (`corpus/`) are left untouched. The uninstaller removes program files while keeping your library, settings and cards by default, unless you explicitly tick the box to erase them.
+
+> **Windows SmartScreen.** The setup program is unsigned, so Windows may show a one-time warning on first launch. Choose **More info → Run anyway**.
+
+### 2. Portable Desktop Folder (Windows)
+
+You can run the desktop app from source, or build the portable folder without using an installer:
+
 ```bash
-python run.py                     # Runs at http://127.0.0.1:8787
-python run.py --port 9000 --reload # Dev mode with auto-reload
-pythonw run.py --log data/app.log # Detached background mode
+# Install desktop requirements
+pip install -r packages/win/requirements.txt
+
+# Run the native desktop window from source
+cd packages/win
+python -m diglota_win
+
+# Or build the portable folder (from the repository root)
+python packages/win/build.py
 ```
 
-> **Clean Shutdown:** Click **Quit** in the app's *Settings* modal. Diglota ensures all database transactions are committed, background tasks safely settled, and vocabulary warmers flushed.
+The build lands in `packages/win/dist/Diglota/Diglota.exe`. The folder is fully portable: copy it anywhere, and `data/` is created directly beside the executable. The app preserves window bounds and the reader's theme across sessions.
+
+### 3. Web / CLI (Cross-Platform)
+
+The web app runs anywhere Python 3.10+ is available:
+
+```bash
+# Install core dependencies
+pip install -r requirements.txt
+
+# Start the server (http://127.0.0.1:8787)
+python run.py
+
+# Optional flags
+python run.py --port 9000 --reload
+pythonw run.py --log data/app.log
+```
+
+> **Windows browser launcher (`Open Diglot.vbs`).** If you would rather use your regular browser without keeping a command prompt open, double-click `Open Diglot.vbs`. It starts the server with `pythonw` (logging to `data/app.log`), waits for it to answer, and opens the app in your default browser. If the app is already running, it simply opens the page. To stop the server, click **Quit the app** in the app's Settings panel.
 
 ---
 
-## ⚙️ Configuration & Architecture
+## Configuration & Local-First Storage
 
-Diglota is strictly **local-first and privacy-respecting**. Core reading, coverage calculation, SQLite persistence, and spaced repetition work **100% offline with zero API keys**.
+Diglota is local-first by design:
 
-Configure optional AI capabilities directly in the web UI under **Settings** (persisted in `data/settings.json`) or via environment variables in `.env`:
+- Your reading progress, reviews and settings live in SQLite under `data/`.
+- Hand-crafted lessons live in `corpus/`.
+- Neither directory is tracked in git, and neither is touched when the program is updated.
+
+Reading, dictionary lookups, vocabulary coverage, quotes and spaced repetition work fully offline. Optional AI features can be configured in the app's Settings panel (persisted in `data/settings.json`) or in a `.env` file:
 
 ```env
-# Tier 1: Semantic Evaluation (TypeSafe System One / Jev)
-TYPESAFE_API_KEY=your_typesafe_key
+# Tier 1: semantic evaluation (TypeSafe System One / Jev)
+TYPESAFE_API_KEY=your_key_here
 TYPESAFE_MODEL=jev-latest
 
-# Tier 2: Interactive Tutor, Quizzes, Glossing & Lesson Weaving
+# Tier 2: interactive tutor, quizzes, glossing and lesson weaving
 LLM_BASE_URL=https://api.openai.com/v1     # Any OpenAI-compatible endpoint
-LLM_API_KEY=your_llm_api_key
-LLM_MODEL=deepseek-chat                   # or gpt-4o, claude-3-5-sonnet, etc.
+LLM_API_KEY=your_key_here
+LLM_MODEL=deepseek-chat                   # Or gpt-4o, claude-3-5-sonnet, etc.
 
-# Storage & Network Overrides
-DIGLOT_CORPUS=./corpus                    # Directory for curated Markdown lessons
-DIGLOT_PROXY=http://127.0.0.1:7890        # Optional HTTP proxy for remote requests
+# Path and network overrides
+DIGLOT_CORPUS=./corpus                    # Curated lesson directory (default: ./corpus)
+DIGLOT_PROXY=http://127.0.0.1:7890        # HTTP/HTTPS proxy, if one is required
 ```
+
+> **Keys.** Keys entered in Settings override `.env` values. They are stored locally and are never serialized or sent back to the browser (`repr=False`).
 
 ### Feature Availability Matrix
 
@@ -92,121 +125,86 @@ DIGLOT_PROXY=http://127.0.0.1:7890        # Optional HTTP proxy for remote reque
 
 ---
 
-## 🎯 Core Features
+## Core Features
 
 ### 1. The Immersive Reader
 
-![The Reader Interface](assets/reader.png)
+![The reader interface](assets/reader.png)
 
-- **Dual-Language Typography:** Spanish in deep teal, English in warm charcoal, lesson focus words in bold, and contextual glosses in muted italic.
-- **Dynamic Scaffolding Dials:**
-  - *Full Assistance:* English text with inline Spanish phrases and glosses.
-  - *Intermediate:* Glosses hidden, English text slightly faded.
-  - *Spanish Immersion:* English prose hidden completely, revealing purely the Spanish passages.
-- **Zero-Latency Word Lookup:** The corpus's built-in vocabulary tables and author glosses are pre-indexed into a local client glossary. Words not in the glossary are warmed asynchronously in the background upon opening an article.
-- **"💡 Explain" & "✨ Full Entry":** Instant morphological breakdowns that identify roots, tenses (e.g., `se volverá` $\rightarrow$ `volverse`, future), usage notes, and common pitfalls without pedantic fluff.
-- **Sentence-Synchronized Bilingual TTS:** Speaks English in native English voices and Spanish in native Spanish voices, correctly segmenting at grammatical clause boundaries rather than fragmented markup tags.
-- **Intelligent Table of Contents:** Automatically maps sections while filtering out web furniture, repeated kickers, and noise.
-- **Register Metadata:** Classifies writing register (*news, essay, conversation, academic, fiction*) and stores manual user corrections directly into the article file.
+- **Dual-language typography.** English appears in warm near-black, Spanish in deep teal, lesson target words in bold, and glosses in muted italics.
+- **Adjustable scaffolding.** Keep glosses visible, fade the English prose, or hide English entirely to read only the Spanish segments.
+- **Zero-latency morphological lookups.** Author glosses and vocabulary boxes are compiled into a local glossary the browser loads directly. A word already present in the corpus resolves instantly, without a network request. Words that are not in the glossary are warmed asynchronously when an article opens.
+- **Full entry and explanations.** Ask for a full dictionary entry — lemma, part of speech, contextual examples and common learner traps — or a concise grammar breakdown.
+- **Sentence-synchronized audio.** Read-aloud switches voices at sentence boundaries: Spanish text in a Spanish voice, English prose in an English voice.
+- **Navigation without clutter.** The contents pane indexes genuine document sections while ignoring duplicate links, kicker lines and page furniture.
+- **Register tracking.** Identifies whether a text is news, essay, conversation, academic or fiction, and lets you update register tags in the article file.
 
----
+### 2. Vocabulary Coverage & Readiness
 
-### 2. Spaced Repetition & Contextual Memory
+![The library](assets/library.png)
 
-![Card Review](assets/review.png)
+Before opening any lesson, the library shows what percentage of its Spanish vocabulary you already know from your personal deck. Coverage calculations stem conjugated verbs, account for diphthong stem changes, strip reflexive clitics and exclude Spanish function words, so the figure reflects what you would actually have to learn.
 
-- **In-Situ Flashcards:** Cards display the target word **inside the exact sentence you met it in**, preserving situational context.
-- **Lemma Intelligence:** Reviewing a conjugated form like `enfatizan` reveals both the contextual meaning (*they emphasise*) and the infinitive lemma (`enfatizar`).
-- **Dual Recall Modes:**
-  - **Recognise:** Comprehend Spanish within context.
-  - **Produce:** Blanked-out cloze recall where you type the target word.
-- **Adaptive Study Lists:** Words looked up three or more times without being explicitly saved are automatically flagged as high-priority struggle words.
-- **Comprehensive Deck Browser:** Search and filter your entire deck by stage, retention rate, or forgotten frequency. All queries feature accent-folded search (`cuestion` matches `cuestión`).
+### 3. In-Context Spaced Repetition (SM-2)
 
-![Saved Words View](assets/saved-words.png)
+![Card review](assets/review.png)
 
----
+- **Cards in context.** Words return for review inside the exact sentence where you met them, not as isolated vocabulary pairs.
+- **Lemma awareness.** Conjugated forms link back to their dictionary lemma; for example, *enfatizan* reveals both *they emphasise* and the infinitive *enfatizar*.
+- **Two review modes.** Practise comprehension in **Recognise** mode, or test active recall in **Produce** mode by typing the missing word into a cloze sentence.
+- **High-frequency lookup lists.** Words looked up three or more times without being saved are surfaced as recommended study items.
+- **Deck management.** Search and filter your cards by review stage, retention rate or forgotten frequency, with accent-folded matching (`cuestion` matches `cuestión`).
 
-### 3. Kept Quotes & Sentence Collection
+![Saved words view](assets/saved-words.png)
 
-- **One-Click Sentence Capture:** Select any passage and click **Keep** to store the complete sentence in your **Quotes** archive with zero model latency.
-- **Automatic Boundary Widening:** A fragment selection automatically widens to its grammatical sentence boundary.
-- **Bidirectional Linking:** Look up any word in the reader, and your saved quotes featuring that word will immediately surface in the popover.
+### 4. Sentence Capture (Quotes)
 
----
+Select any passage while reading and click **Keep** to save the full sentence to your Quotes collection, with no model call. Selections expand automatically to complete sentence boundaries. When you look up a word in later readings, any saved quotes containing that word appear in the lookup popover.
 
-### 4. Interactive Writing Studio
+### 5. Writing Workspace
 
-- **Context-Aware Prompts:** Prompts are generated from your personal struggle words, recently saved vocabulary, and currently active reading themes.
-- **Real-Time Language Ratio Meter:** Live analysis displays word count, sentence count, and the exact proportion of your draft written in authentic Spanish.
-- **Structured Annotation Engine:**
-  - 🟢 **Good:** Effective phrasing and correct idioms.
-  - 🔴 **Fix:** Grammatical errors and morphological mismatches.
-  - 🟡 **Style:** Opportunities for more natural native expression.
-- **"Improve This" Assistants:**
-  - *Fix grammar only*
-  - *Sound native*
-  - *Enrich vocabulary*
-  - *Keep my exact words*
-- **Draft-to-Lesson Compiler:** Convert your own written drafts directly into full-fledged diglot reading lessons with glosses and vocabulary anchors.
+Practise producing Spanish in an active drafting environment:
 
----
+- **Targeted prompts.** Prompts draw on words you frequently look up, recently saved cards, and themes from articles you have read.
+- **Live language ratio.** Word count, sentence count and the exact percentage of your text written in Spanish, updated as you type.
+- **Inline feedback.** With an LLM configured, receive specific annotations — **Good**, **Fix** or **Style** — placed directly on your sentences.
+- **Revision options.** Ask for a revision that fixes grammar, sounds more native, enriches the phrasing, or keeps your original wording.
+- **Make a lesson.** Convert a draft into a full diglot lesson, with vocabulary tables and grammar notes, ready for your library.
 
-### 5. Reading Analytics & The Passage Map
+### 6. Reading Analytics & Passage Map
 
-![Progress and Analytics](assets/progress.png)
+![Progress and analytics](assets/progress.png)
 
-- **Evidence-Based Comprehension:** Analyzes vocabulary exposure across *New*, *Met Before*, and *Consolidated* words (with Spanish function words excluded from statistics).
-- **Scaffolding Dependence Rate:** Tracks lookup and translation frequency per 1,000 words read over time.
-- **Weekly Behavioral Challenges:** Suggests targeted learning habits based on detected gaps (e.g., branching into unread registers or finishing in-progress articles).
-- **TF-IDF Passage Map:** An interactive network graph clustering your library by shared thematic vocabulary and read readiness.
+- **Exposure metrics.** Tracks Spanish words read over time, sorting vocabulary into new, previously met and repeatedly seen words, while excluding function words.
+- **Scaffolding dependence.** Measures lookups, full entries and translations per 1,000 words read, so you can see your reliance on reading aids fall.
+- **Weekly goals.** Reads your history and proposes balanced targets, such as reading an unread register or finishing an article already in progress.
+- **Passage map.** Draws your library as a connected graph clustered by shared vocabulary using IDF weighting, showing which articles prepare you for the others.
 
----
+### 7. Semantic Translation Grading
 
-### 6. Semantic Translation Evaluation
+Translation drills test understanding rather than exact string matches. Diglota uses a three-tier grading system:
 
-Traditional flashcard systems fail at open translation because string matching cannot distinguish valid synonyms from severe misunderstandings. Diglota deploys a multi-tiered grading pipeline:
+1. **TypeSafe Jev.** Evaluates meaning, grammar and naturalness with calibrated confidence scores — distinguishing, for example, a grammatically correct sentence with inverted meaning from an accurate translation that happens to use different vocabulary.
+2. **Chat LLM fallback.** Gives a qualitative evaluation and explanation when Jev is not configured.
+3. **Offline heuristic matching.** Checks the answer against the reference. An offline answer that differs from the reference is labelled **Unverified** rather than incorrect.
 
-```
-[Student Response]
-        │
-        ▼
-┌───────────────────────────────┐
-│ Tier 1: TypeSafe Jev Engine   │ ──► Multi-dimensional confidence scoring
-└───────────────────────────────┘     (Meaning 98% · Grammar 97% · Naturalness 95%)
-        │ (if unavailable)
-        ▼
-┌───────────────────────────────┐
-│ Tier 2: General Chat LLM      │ ──► Semantic feedback with qualitative rationale
-└───────────────────────────────┘
-        │ (if offline)
-        ▼
-┌───────────────────────────────┐
-│ Tier 3: Heuristic Baseline    │ ──► Reference match & non-punitive verification
-└───────────────────────────────┘
-```
+### 8. Lesson Ingestion & Discovery
 
-> **Design Principle:** Diglota *never* penalizes alternative valid translations when operating offline—unrecognized variations are marked as **Unverified** rather than incorrect.
+![Discover engine](assets/discover.png)
+
+- **Web and text import.** Paste an article URL or raw text. The pipeline extracts the body, determines CEFR difficulty, weaves Spanish into the English prose, formats vocabulary tables and validates the result.
+- **Three independent settings.**
+  - **Level:** A1 to C1 (or Auto), controlling vocabulary frequency, tenses and glossing depth.
+  - **Spanish amount:** Light (22%) to Immersion (68%).
+  - **Weave mode:** Mixed (weaving within sentences at natural clause boundaries) or Strict (whole sentences alternate).
+- **Discover search.** Search Wikipedia and curated long-form articles by topic, or look for pieces that would fill gaps in your review deck.
+- **Background job queue.** Imports and searches run in a persistent, cancellable queue with bounded concurrency, streaming live progress over Server-Sent Events.
 
 ---
 
-### 7. Lesson Ingestion & The Discover Engine
+## The Diglot Corpus Format
 
-![Discover Engine](assets/discover.png)
-
-- **Multi-Source Ingestion:** Import any web URL or paste raw text. The ingestion engine strips boilerplate, determines target CEFR levels (A1–C1), and weaves Spanish into English prose.
-- **Precise Dial Controls:**
-  - **Level:** A1 (high glossing, present tense, high-frequency lexicon) to C1 (idiomatic, literary nuances).
-  - **Spanish Density:** From Light (22%) to Immersion (68%).
-  - **Weave Geometry:** *Mixed (natural clause boundaries)* or *Strict (whole sentences only)*.
-- **Targeted Discover Search:** Finds articles across Wikipedia and curated publications matching specific topics or missing vocabulary clusters.
-- **Asynchronous Background Processing:** Imports run in a managed, cancellable job queue (bounded concurrency) with Server-Sent Events (SSE) tracking progress.
-
----
-
-## 📄 The Diglot Corpus Format
-
-Lessons in Diglota are stored as clean, human-readable Markdown files. Hand-crafted lessons and AI-generated imports share the identical format:
+Lessons are plain Markdown files. Hand-crafted articles in `corpus/` and imports in `data/library/` share exactly the same format:
 
 ```markdown
 ### Article Identification & Preview
@@ -234,100 +232,109 @@ process...
 
 ### Portable Lesson Sharing (`diglot/1`)
 
-Export any lesson as a standalone Markdown file. Shared files append advisory verification metadata without exporting personal study history:
+Click **Share this lesson** on any article to export a `.md` file with standard sharing metadata:
 
 ```markdown
 - **Diglot Format:** diglot/1
-- **Shared By:** maria
+- **Shared By:** alice
 - **Shared On:** 2026-10-09
-- **Lesson Origin:** woven by deepseek-v4.1-flash
+- **Lesson Origin:** woven by deepseek-chat
 - **Body Digest:** 4baf5139c17e
 ```
 
-Importing a shared lesson presents a pre-flight summary detailing author, origin, and vocabulary overlap before committing it to your local library.
+When you import a shared file, the library verifies the body digest and shows the author and vocabulary previews before adding the file to your shelf. Shared files never export personal review schedules, cards or reading history.
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 .
-├── app/
-│   ├── diglot.py          # Core parser, token segmenter, lexicon (zero external dependencies)
-│   ├── vocab.py           # Morphology, stemming, clitics, vocabulary coverage metrics
-│   ├── reading.py         # Reading tracker (scroll telemetry -> actual consumed words)
-│   ├── analytics.py       # Exposure, scaffolding ratios, and progress aggregations
-│   ├── corpus.py          # Passage network graph, TF-IDF weights, vocabulary clustering
-│   ├── levels.py          # CEFR calibration, density ratios, and weave presets
-│   ├── glossary.py        # Local morphology dictionary extracted from corpus anchors
-│   ├── warm.py            # Speculative background vocabulary resolution
-│   ├── library.py         # Unified catalog interface (curated corpus + imported lessons)
-│   ├── config.py          # Settings, API keys, paths, and .env vs panel precedence
-│   ├── store.py           # SQLite persistence layer (cards, SRS reviews, progress, jobs)
-│   ├── srs.py             # Pure SM-2 spaced repetition algorithms
-│   ├── llm.py             # Resilient OpenAI-compatible HTTP client
-│   ├── tutor.py           # Conversational explanations, dictionary expansions, prompts
-│   ├── judge.py           # TypeSafe Jev semantic evaluation client
-│   ├── grading.py         # Three-tier grading pipeline with graceful fallbacks
-│   ├── registers.py       # Discourse register classification & tag management
-│   ├── transfer.py        # Lesson serialization, digest validation, and sharing
-│   ├── quotes.py          # Kept sentences extraction and lookup indexing
-│   ├── challenges.py      # Dynamic weekly learning goals
-│   ├── writing.py         # Writing studio metrics and correction parsers
-│   ├── ingest.py          # Web / text ingestion into woven diglot Markdown
-│   ├── fetch.py           # Article extractor and search scrapers
-│   ├── recommend.py       # Gap-filling and topic discovery recommendations
-│   ├── jobs.py            # Bounded background task manager with SSE telemetry
-│   └── server.py          # FastAPI application entrypoint and route declarations
-├── corpus/                # Curated Markdown lessons (one sample ships with the app)
-├── data/                  # User database (SQLite), settings, and imported library
-├── static/                # Single-page frontend (Vanilla JS, CSS, zero build step)
-├── tools/                 # Diagnostics: segment_qa, segment_preview, ui_test, ui_import_test
-├── tests/                 # 540 automated pytest tests
-├── run.py                 # CLI application server launcher
-└── Open Diglot.vbs        # Windows desktop double-click launcher
+├── packages/
+│   ├── core/                      # Core processing and language engine
+│   │   ├── app/
+│   │   │   ├── diglot.py          # Parser, segmenter and lexicon (zero dependencies)
+│   │   │   ├── vocab.py           # Morphology, stemming, clitics, coverage tracking
+│   │   │   ├── reading.py         # Scroll telemetry to word-reading conversion
+│   │   │   ├── analytics.py       # Exposure, scaffolding ratios, reading metrics
+│   │   │   ├── corpus.py          # Passage graph, TF-IDF weights, topic clusters
+│   │   │   ├── levels.py          # CEFR calibration, density and weave presets
+│   │   │   ├── glossary.py        # Local translations extracted from corpus anchors
+│   │   │   ├── warm.py            # Speculative background vocabulary resolution
+│   │   │   ├── library.py         # Unified catalog (curated corpus + imported lessons)
+│   │   │   ├── config.py          # Settings management (merging file and environment)
+│   │   │   ├── store.py           # SQLite persistence (cards, reviews, progress, jobs)
+│   │   │   ├── srs.py             # SM-2 spaced repetition algorithms
+│   │   │   ├── llm.py             # OpenAI-compatible HTTP client
+│   │   │   ├── tutor.py           # Explanations, dictionary lookups, writing prompts
+│   │   │   ├── judge.py           # TypeSafe Jev semantic evaluation client
+│   │   │   ├── grading.py         # Three-tier grading pipeline with fallbacks
+│   │   │   ├── registers.py       # Register classification (news, essay, fiction, etc.)
+│   │   │   ├── transfer.py        # Sharing serialization, digest checks and import
+│   │   │   ├── quotes.py          # Kept sentences extraction and lookup indexing
+│   │   │   ├── challenges.py      # Dynamic weekly goal generation
+│   │   │   ├── writing.py         # Writing workspace measurements and feedback parsing
+│   │   │   ├── ingest.py          # Web and paste ingestion into woven Markdown
+│   │   │   ├── fetch.py           # Article content extraction and search scrapers
+│   │   │   ├── recommend.py       # Vocabulary-driven recommendations and gap detection
+│   │   │   ├── jobs.py            # Bounded background task manager with SSE events
+│   │   │   └── server.py          # FastAPI application server and routes
+│   │   └── tests/                 # 540 core engine tests
+│   ├── ui/
+│   │   └── static/                # Single-page frontend (HTML, CSS, JS; no build step)
+│   ├── web/
+│   │   └── run.py                 # CLI entry point (invoked by the root run.py)
+│   └── win/                       # Windows desktop app and installer packages
+│       ├── diglota_win/           # Desktop shell (pywebview + in-process uvicorn)
+│       ├── installer.py           # Setup window; installs into the folder it runs from
+│       ├── uninstaller.py         # Removal window; runs from %TEMP% so it can delete itself
+│       ├── setup_common.py        # Every install decision, with no UI (the tested part)
+│       ├── setup_ui.py            # The setup windows' small tkinter kit
+│       ├── build.py               # PyInstaller build script for the app and setup exes
+│       ├── make_icon.py           # Windows icon asset builder
+│       ├── *.spec                 # PyInstaller specification files
+│       └── tests/                 # 40 desktop and setup tests
+├── corpus/                        # Curated Markdown lessons (one sample ships)
+├── data/                          # User database, settings and library (not in git)
+├── assets/                        # Screenshots and documentation images
+├── tools/                         # QA tooling (segment_qa, ui_test, publish, etc.)
+├── run.py                         # Root entry point delegating to packages/web/run.py
+└── Open Diglot.vbs                # Windows browser launcher (runs the server via pythonw)
 ```
 
 ---
 
-## 🧪 Testing & Verification
+## Testing & Quality Assurance
 
-Diglota maintains high code quality and test coverage across unit logic, linguistic segmentation, and end-to-end browser workflows:
+The suite contains 580 automated tests covering the language engine, desktop packaging and setup safety:
 
 ```bash
-# 1. Install development & testing tooling
+# Install development and testing tooling
 pip install -r requirements-dev.txt
 
-# 2. Run the unit test suite (540 tests)
-python -m pytest tests/ -q
+# Run the full suite (580 tests)
+python -m pytest -q
 
-# 3. Run browser end-to-end checks (Playwright driving Chrome)
+# Run engine tests only (540 tests)
+python -m pytest packages/core/tests/ -q
+
+# Run desktop and setup tests only (40 tests)
+python -m pytest packages/win/tests/ -q
+
+# Run browser checks (drives local Chrome via Playwright)
 python tools/ui_test.py
-
-# 4. Run end-to-end browser test with AI grading validation
 python tools/ui_test.py --with-ai
 
-# 5. Verify linguistic segmenter integrity across the corpus
+# Audit the segmenter across the corpus
 python tools/segment_qa.py
 ```
 
-> **Linguistic Invariant:** `tools/segment_qa.py` audits the corpus segmenter against implausible spans (e.g. Spanish spans saturated with English function words). It verifies zero classification anomalies across the entire corpus.
+`tools/segment_qa.py` checks for implausible Spanish spans — for example, spans saturated with English function words — and currently reports zero suspect spans across the bundled lessons.
 
 ---
 
-## 💡 Engineering Highlights
-
-- **The Reading Surface is Sacred:** Reading performance has zero blocking network overhead. Telemetry, analytics, and lookups use optimistic caching, pre-compiled glossaries, and passive request piggybacking.
-- **Format Symmetry:** Imported lessons, user writings, and hand-crafted articles all serialize to the identical Markdown corpus format.
-- **Function Word Filtering:** All coverage and exposure calculations filter out Spanish function words (articles, prepositions, conjunctions) to ensure metrics reflect real vocabulary acquisition.
-- **Fail-Soft Degradation:** The entire system gracefully falls back across every layer: Jev $\rightarrow$ LLM $\rightarrow$ Heuristic for grading; LLM $\rightarrow$ Corpus glossary for definitions; SSE $\rightarrow$ Polling for background tasks.
-
----
-
-## 📜 License
+## Licence
 
 **GNU Affero General Public License v3.0** — see [`LICENSE`](LICENSE).
 
-Use it, change it, share it. Anyone distributing it, or running a modified
-version as a network service, must publish their source under the same terms
-(AGPL §13).
+Use it, change it, share it. Anyone distributing it, or running a modified version as a network service, must publish their source under the same terms (AGPL §13).

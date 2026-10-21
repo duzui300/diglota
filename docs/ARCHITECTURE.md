@@ -51,34 +51,71 @@ fail a test immediately.
 ## Where things live
 
 ```
-app/
-  diglot.py     THE FORMAT: parse + segment + segmenter lexicon   [no deps]
-  vocab.py      stemming, coverage measurement
-  reading.py    scroll position -> which words were read
-  levels.py     the three import dials (level, amount, weave)
-  corpus.py     passage graph: shared vocabulary, IDF, clusters
-  analytics.py  exposure, scaffolding, headlines
-  glossary.py   local translations mined from the corpus
-  warm.py       resolves an article's vocabulary before it is clicked
-  library.py    the shelves; corpus + imports behind one interface
-  store.py      all SQLite; migrations live in _migrate
-  srs.py        SM-2, pure functions
-  llm.py        chat client (per-call timeout + attempts)
-  tutor.py      what the chat model GENERATES  + PROMPT_VERSION
-  judge.py      what Jev DECIDES; the Verdict type
-  grading.py    the three grading tiers and what may be called wrong
-  registers.py  news / essay / conversation / academic / fiction
-  transfer.py   the share envelope: stamp, digest, pre-flight, import
-  quotes.py     a selection in the reader -> a kept sentence
-  challenges.py the weekly goal: six kinds, all measured from existing data
-  writing.py    the writing prompt, modes, and the model-free measurements
-  ingest.py     article, paste or your own writing -> woven lesson
-  fetch.py      URL (or a paste) -> article blocks; keyless search
-  recommend.py  vocabulary-driven discovery
-  server.py     FastAPI; the App object holds all shared state
-static/         no build step; app.js is one file by design
-tools/          segment_qa (corpus health), ui_test (browser), ui_import_test
+packages/
+  core/
+    app/
+      diglot.py     THE FORMAT: parse + segment + segmenter lexicon   [no deps]
+      vocab.py      stemming, coverage measurement
+      reading.py    scroll position -> which words were read
+      levels.py     the three import dials (level, amount, weave)
+      corpus.py     passage graph: shared vocabulary, IDF, clusters
+      analytics.py  exposure, scaffolding, headlines
+      glossary.py   local translations mined from the corpus
+      warm.py       resolves an article's vocabulary before it is clicked
+      library.py    the shelves; corpus + imports behind one interface
+      store.py      all SQLite; migrations live in _migrate
+      srs.py        SM-2, pure functions
+      llm.py        chat client (per-call timeout + attempts)
+      tutor.py      what the chat model GENERATES  + PROMPT_VERSION
+      judge.py      what Jev DECIDES; the Verdict type
+      grading.py    the three grading tiers and what may be called wrong
+      registers.py  news / essay / conversation / academic / fiction
+      transfer.py   the share envelope: stamp, digest, pre-flight, import
+      quotes.py     a selection in the reader -> a kept sentence
+      challenges.py the weekly goal: six kinds, all measured from existing data
+      writing.py    the writing prompt, modes, and the model-free measurements
+      ingest.py     article, paste or your own writing -> woven lesson
+      fetch.py      URL (or a paste) -> article blocks; keyless search
+      recommend.py  vocabulary-driven discovery
+      server.py     FastAPI; the App object holds all shared state
+    tests/          pytest: the engine and its promises
+  ui/
+    static/         no build step; app.js is one file by design
+  web/
+    run.py          the CLI front door; the root run.py delegates here
+  win/
+    diglota_win/    the native window: pywebview, splash, single instance
+    installer.py    setup window; installs into the folder it runs from
+    uninstaller.py  removal window; relaunches from %TEMP% to delete itself
+    setup_common.py every install decision, with no UI (the tested part)
+    setup_ui.py     the setup windows' canvas kit
+    *.spec          PyInstaller recipes: app folder, setup exe, uninstaller
+    build.py        freezes the folder, or the folder plus the installer
+tools/              segment_qa (corpus health), ui_test (browser), ui_import_test
 ```
+
+**One engine, three front doors.** The browser app, the command line and the
+desktop window all run the same `app.server`. `packages/win` adds a window and a
+way to freeze it, never a second implementation — a change to the reader reaches
+all three. The engine package kept the name `app` through the move to
+`packages/core`, which is why the five hundred-odd existing tests did not need a
+single import rewritten.
+
+**Two roots, and they answer different questions.** `config.PROJECT_ROOT` is the
+*writable workspace*: the repository in a checkout, and the folder beside the exe
+in a frozen build. That is where `data/` and `corpus/` live. `config.BUNDLE_ROOT`
+is `sys._MEIPASS`: the read-only bundle, where `packages/ui/static` was shipped.
+Keeping them apart is what lets the app sit in the same folder as the library it
+must not overwrite — and what lets the installer live there too.
+
+**The setup programs are the only tkinter in the repository.** They need to start
+on a machine that has never run the app and has no Python, so they use nothing
+but the standard library. The windows are a thin skin over `setup_common`, which
+holds every promise the installer makes: it never writes `data/`, never
+overwrites an existing lesson in `corpus/`, refuses a payload entry that resolves
+outside the install folder, and keeps the reader's library on uninstall unless
+the person ticks the box that says otherwise. That module is what the tests
+exercise; the window is only a way to reach it.
 
 **The settings panel writes to `data/settings.json`, and what it writes wins over
 the `.env`.** The `.env` is how the machine is configured and the panel is how the
@@ -522,10 +559,13 @@ costs the reader a request.
 pip install -r requirements.txt
 python run.py                        # http://127.0.0.1:8787
 
-python -m pytest tests/ -q           # 532 unit tests
+python -m pytest -q                  # 580 tests: core, desktop shell, setup
 python tools/ui_test.py              # 287 browser checks (306 with --with-ai)
 python tools/ui_import_test.py       # slow: imports a real article end to end
 python tools/segment_qa.py           # corpus segmentation health (want 0 suspect)
+
+cd packages/win && python -m diglota_win   # the desktop app, from source
+python packages/win/build.py --installer   # portable folder + one-file setup exe
 ```
 
 The server falls back to a machine-wide `.env` if the project has none. Outbound web

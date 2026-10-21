@@ -31,7 +31,8 @@ from app import transfer  # noqa: E402
 from app.diglot import content_fingerprint, parse_article, parse_file  # noqa: E402
 
 CORPUS = corpus_dir()
-IMPORTS = Path(__file__).resolve().parents[1] / "data" / "library"
+# The reader's library lives at the workspace root, not beside the engine package.
+IMPORTS = Path(__file__).resolve().parents[3] / "data" / "library"
 
 
 class Entry:

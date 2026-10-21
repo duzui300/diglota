@@ -14,3 +14,10 @@ shots/
 *.log
 
 .env
+
+# PyInstaller output (packages/win/build.py builds the desktop app)
+build/
+dist/
+
+# Intermediate PNG make_icon.py writes before composing the .ico
+packages/win/assets/diglota-256.png
