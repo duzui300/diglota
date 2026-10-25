@@ -425,8 +425,8 @@ def recommend(
                 "Scored by fetching each candidate and looking for the English words behind "
                 "your saved Spanish. No score means no deck yet."
                 if probes else
-                "You have not saved any words yet, so there is nothing to match against — "
-                "these are simply substantial articles on the topics suggested."
+                "You have not saved any words yet, so there is nothing to match against. "
+                "These are simply substantial articles on the topics suggested."
             ),
         },
     }

@@ -19,6 +19,7 @@ twice:
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import json
 import os
 import shutil
@@ -33,7 +34,7 @@ APP_NAME = "Diglota"
 APP_EXE = "Diglota.exe"
 UNINSTALL_EXE = "Uninstall.exe"
 WINDOW_TITLE = "Diglota"            # the running reader's title, to find it again
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 PUBLISHER = "Diglota"
 HELP_URL = "https://github.com/duzui300/diglota"
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Diglota"
@@ -285,16 +286,91 @@ def remove_uninstall_entry() -> None:
 # -- the running reader --------------------------------------------------- #
 
 def _find_window(title: str) -> int | None:
+    """The first top-level window with exactly this title, whatever owns it."""
     if sys.platform != "win32":
         return None
     user32 = ctypes.windll.user32
-    user32.FindWindowW.restype = ctypes.c_void_p
-    handle = user32.FindWindowW(None, title)
-    return int(handle) if handle else None
+    user32.EnumWindows.argtypes = [
+        ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    found: list[int] = []
+
+    def visit(handle: int, _param: int) -> bool:
+        text = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(ctypes.c_void_p(handle), text, 512)
+        if text.value == title:
+            found.append(int(handle))
+            return False
+        return True
+
+    user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(visit), None)
+    return found[0] if found else None
+
+
+def _process_image(handle: int) -> str:
+    """The executable behind a window, or an empty string if it cannot be read."""
+    if sys.platform != "win32":
+        return ""
+    user32 = ctypes.windll.user32
+    kernel = ctypes.windll.kernel32
+    user32.GetWindowThreadProcessId.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+    kernel.OpenProcess.argtypes = [
+        ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p, ctypes.wintypes.DWORD, ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.wintypes.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+
+    pid = ctypes.wintypes.DWORD()
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(handle), ctypes.byref(pid))
+    process = kernel.OpenProcess(0x1000, False, pid.value)   # QUERY_LIMITED_INFORMATION
+    if not process:
+        return ""
+    try:
+        buffer = ctypes.create_unicode_buffer(1024)
+        size = ctypes.wintypes.DWORD(len(buffer))
+        if not kernel.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
+            return ""
+        return buffer.value
+    finally:
+        kernel.CloseHandle(process)
+
+
+def _is_app_executable(path: str) -> bool:
+    return Path(path).name.casefold() == APP_EXE.casefold()
+
+
+def _find_app_window() -> int | None:
+    """A window titled Diglota that actually belongs to Diglota.exe.
+
+    A title is not evidence enough. Explorer's TabProxyWindow can carry a
+    folder's name, and a browser window can be titled with the page's name.
+    Those must not stop an install; only the reader's own process does.
+    """
+    if sys.platform != "win32":
+        return None
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    def visit(handle: int, _param: int) -> bool:
+        text = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(ctypes.c_void_p(handle), text, 512)
+        if text.value == WINDOW_TITLE and _is_app_executable(_process_image(int(handle))):
+            found.append(int(handle))
+            return False
+        return True
+
+    user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(visit), None)
+    return found[0] if found else None
 
 
 def app_is_running() -> bool:
-    return _find_window(WINDOW_TITLE) is not None
+    return _find_app_window() is not None
 
 
 def close_running_app(timeout: float = 8.0) -> bool:
@@ -308,7 +384,7 @@ def close_running_app(timeout: float = 8.0) -> bool:
         return True
     import time
 
-    handle = _find_window(WINDOW_TITLE)
+    handle = _find_app_window()
     if not handle:
         return True
     ctypes.windll.user32.PostMessageW(ctypes.c_void_p(handle), 0x0010, 0, 0)   # WM_CLOSE

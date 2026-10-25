@@ -38,7 +38,6 @@ from .diglot import Article
 class Register:
     code: str
     name: str
-    icon: str
     # What is different about the *Spanish* here. This is the learning value of
     # the label, so it is written as a reading note rather than a definition.
     blurb: str
@@ -54,7 +53,6 @@ REGISTERS: tuple[Register, ...] = (
     Register(
         code="news",
         name="News",
-        icon="📰",
         blurb="Reported events in the past tense, with attributed quotes. Spanish news "
               "leans on impersonal and passive constructions and turns verbs into nouns.",
         signal="reports events to a general reader; attributed quotes; datelines; "
@@ -64,16 +62,14 @@ REGISTERS: tuple[Register, ...] = (
     Register(
         code="essay",
         name="Essay",
-        icon="📚",
-        blurb="One voice arguing a position. Connectives do the work — sin embargo, "
-              "por lo tanto, en cambio — and the first person is present.",
+        blurb="One voice arguing a position. Connectives do the work (sin embargo, "
+              "por lo tanto, en cambio), and the first person is present.",
         signal="a first-person argument; rhetorical questions; connectives carrying "
                "the reasoning; no citations and no plot",
     ),
     Register(
         code="conversation",
         name="Conversation",
-        icon="💬",
         blurb="People talking. Short turns, fillers, second person, and the present "
               "tense where writing would use something more formal.",
         signal="dialogue between speakers; short turns; fillers and interjections; "
@@ -83,9 +79,8 @@ REGISTERS: tuple[Register, ...] = (
     Register(
         code="academic",
         name="Academic",
-        icon="🎓",
         blurb="Impersonal and heavily subordinated. Terms are defined before use and "
-              "the subjunctive appears in hedging — puede que, es posible que.",
+              "the subjunctive appears in hedging (puede que, es posible que).",
         signal="a research or textbook voice; citations or numbered references; "
                "definitions; impersonal se; nominalisations and nested subordinate clauses",
         search="research",
@@ -93,7 +88,6 @@ REGISTERS: tuple[Register, ...] = (
     Register(
         code="fiction",
         name="Fiction",
-        icon="📖",
         blurb="Narrative past and description. Dialogue is marked with dashes, and the "
               "past tenses alternate for background and event.",
         signal="a narrative; characters and setting; description; dialogue marked with "
@@ -118,7 +112,7 @@ def resolve(code: str | None) -> Register | None:
 
 def label(code: str | None) -> str:
     register = resolve(code)
-    return f"{register.icon} {register.name}" if register else ""
+    return register.name if register else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -269,7 +263,7 @@ def describe(code: str) -> str:
 
 def options() -> list[dict[str, Any]]:
     return [
-        {"code": register.code, "name": register.name, "icon": register.icon,
+        {"code": register.code, "name": register.name,
          "blurb": register.blurb, "signal": register.signal}
         for register in REGISTERS
     ]

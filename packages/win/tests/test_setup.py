@@ -229,7 +229,7 @@ def test_the_default_folder_is_the_folder_setup_runs_from(tmp_path: Path,
                                                           monkeypatch) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable",
-                        str(tmp_path / "Diglota-Setup-1.0.0.exe"))
+                        str(tmp_path / f"Diglota-Setup-{common.VERSION}.exe"))
     assert common.default_install_dir() == tmp_path
 
 
@@ -272,6 +272,14 @@ def test_the_shortcut_folders_exist() -> None:
     assert common.start_menu_dir().is_dir()
     assert common.desktop_dir().is_dir()
     assert common._find_window("A window that cannot exist 4C1F00B2") is None
+
+
+def test_a_window_only_counts_as_the_reader_when_diglota_owns_it() -> None:
+    assert common._is_app_executable(r"C:\Apps\Diglota\Diglota.exe")
+    assert not common._is_app_executable(r"C:\Windows\explorer.exe")
+    assert not common._is_app_executable(
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    assert not common._is_app_executable("")
 
 
 def test_the_payload_in_a_checkout_is_found_where_the_build_leaves_it() -> None:

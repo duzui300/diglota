@@ -36,7 +36,7 @@ MUTEX_NAME = "Local\\Diglota.Desktop"
 DEFAULT_SIZE = (1280, 860)
 SPLASH_SIZE = (720, 520)
 
-PALETTES = {"paper": "#f4efe6", "sepia": "#ece0c8", "night": "#0f1114"}
+PALETTES = {"paper": "#e8ebe0", "sepia": "#e4d6bd", "night": "#151d17"}
 
 log = logging.getLogger("diglot.desktop")
 

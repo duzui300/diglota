@@ -116,8 +116,8 @@ class Grading:
             note = "No judgment model configured, so the tutor grades instead."
         else:
             note = ("No model configured, so exercises cannot be generated. Add one and "
-                    "answers are checked by comparison with the article's own Spanish — "
-                    "unusual ones are reported as unverified rather than wrong.")
+                    "answers are checked by comparison with the article's own Spanish. "
+                    "Unusual ones are reported as unverified rather than wrong.")
         return {
             "tiers": self.tiers,
             "primary": self.primary,
@@ -294,7 +294,7 @@ Confidence that the answer is correct and that the learner understood, even if w
             if graded is not None:
                 return graded
         return Verdict(
-            error="reviewing writing needs a model — set LLM_* to have this piece "
+            error="reviewing writing needs a model. Set LLM_* to have this piece "
                   "read. What can be measured without one is shown above.",
             method="local",
             model="",

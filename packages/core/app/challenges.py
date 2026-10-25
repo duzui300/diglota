@@ -202,7 +202,7 @@ def propose(ctx: Context, gaps: list[dict[str, Any]] | None = None) -> dict[str,
         if gap.get("register") in ("news", "conversation", "fiction", "academic"):
             return _pick("spread", ctx, 3,
                          reason=f"You have never read anything in the {gap['label']} register. "
-                                f"{gap['available']} of them are already on your shelves.")
+                                f"{gap['available']} of them {'is' if gap['available'] == 1 else 'are'} already on your shelves.")
 
     if started >= 2 and started > finished:
         return _pick("finish", ctx, 2,

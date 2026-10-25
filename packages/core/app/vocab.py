@@ -194,9 +194,9 @@ def text_coverage(article: Article, deck: Iterable[dict]) -> dict:
 def verdict(token_ratio: float) -> tuple[str, str]:
     """A plain-language reading of the coverage number."""
     if token_ratio >= 0.97:
-        return "comfortable", "You know almost every Spanish word here — read it for fluency."
+        return "comfortable", "You know almost every Spanish word here. Read it for fluency."
     if token_ratio >= 0.90:
         return "stretch", "A few new words per paragraph. This is the range where reading teaches most."
     if token_ratio >= 0.75:
-        return "demanding", "Dense with new words — expect to look things up."
+        return "demanding", "Dense with new words. Expect to look things up."
     return "immersion", "Most of this Spanish is new. Lean on the English and enjoy the shape of it."

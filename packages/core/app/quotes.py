@@ -132,7 +132,7 @@ def locate(article: Article, block_index: int, text: str) -> tuple[Quote | None,
     haystack, index = _normalise(plain)
     at = haystack.find(needle)
     if at < 0:
-        return None, "the page has changed since it was loaded — reload and try again"
+        return None, "the page has changed since it was loaded. Reload and try again."
     raw_start = index[at]
     raw_end = index[at + len(needle) - 1] + 1
 

@@ -153,7 +153,7 @@ def test_a_goal_started_today_measures_today_only():
 def test_a_register_gap_outranks_everything_else():
     """It is the one failure the reader cannot see from the inside: you cannot
     miss what you never look at."""
-    gaps = [{"register": "news", "label": "📰 News", "available": 2}]
+    gaps = [{"register": "news", "label": "News", "available": 2}]
     proposal = challenges.propose(context(), gaps)
     assert proposal["kind"] == "spread"
     assert "News" in proposal["reason"]
@@ -177,7 +177,7 @@ def test_bursty_reading_is_proposed_when_there_is_nothing_to_finish():
 
 
 def test_a_proposal_always_says_why():
-    for gaps in ([{"register": "news", "label": "📰 News", "available": 1}], []):
+    for gaps in ([{"register": "news", "label": "News", "available": 1}], []):
         proposal = challenges.propose(context(), gaps)
         assert proposal["reason"] and proposal["why"]
         assert proposal["target"] >= 1

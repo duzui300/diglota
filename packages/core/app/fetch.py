@@ -626,7 +626,7 @@ def _search_wikipedia(query: str, *, proxy: str | None) -> list[dict[str, str]]:
         out.append({
             "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_")),
             "title": title,
-            "snippet": _plain(str(hit.get("snippet", ""))) + f" · {hit.get('wordcount', 0)} words",
+            "snippet": _plain(str(hit.get("snippet", ""))) + f", {hit.get('wordcount', 0)} words",
             "site": "en.wikipedia.org",
             "source": "Wikipedia",
         })
@@ -669,7 +669,7 @@ def _search_feeds(query: str, *, proxy: str | None) -> list[dict[str, str]]:
                 "title": item["title"],
                 "snippet": textwrap.shorten(item["snippet"], width=220, placeholder=" ..."),
                 "site": urllib.parse.urlparse(item["url"]).netloc.removeprefix("www."),
-                "source": f"{name} · {topic}",
+                "source": f"{name}, {topic}",
             }))
         hits.sort(key=lambda pair: -pair[0])
         return [item for _, item in hits[:4]]

@@ -57,7 +57,7 @@ class UninstallerApp:
 
     def _chrome(self) -> None:
         kit, page, ink = self.kit, self.kit.colors["page"], self.kit.colors["ink"]
-        tk.Label(self.root, text=common.APP_NAME, font=kit.font("serif", 26, "bold"),
+        tk.Label(self.root, text=common.APP_NAME, font=kit.font("serif", 26),
                  bg=page, fg=ink).place(x=kit.px(44), y=kit.px(30), anchor="nw")
         tk.Label(self.root,
                  text=f"Version {common.VERSION}. Free software under the AGPL-3.0.",
@@ -99,7 +99,7 @@ class UninstallerApp:
     def show_confirm(self) -> None:
         self._clear()
         kit = self.kit
-        self._label("Remove Diglota?", family="serif", size=25, weight="bold", y=0)
+        self._label("Remove Diglota?", family="serif", size=25, y=0)
         self._label(
             "The program will be removed from this computer. Your lessons, reviews "
             "and your place in every text stay in the folder below, so installing "
@@ -133,14 +133,14 @@ class UninstallerApp:
 
     def show_working(self) -> None:
         self._clear()
-        self._label("Removing Diglota.", family="serif", size=23, weight="bold", y=0)
+        self._label("Removing Diglota.", family="serif", size=23, y=0)
         self.detail = self._label("Closing the open reader", size=14,
                                   fg=self.kit.colors["ink2"], wrap=566, y=44)
 
     def show_done(self, kept: bool, existed: bool) -> None:
         self._clear()
         kit = self.kit
-        self._label("Diglota was removed.", family="serif", size=25, weight="bold", y=0)
+        self._label("Diglota was removed.", family="serif", size=25, y=0)
         if kept:
             self._label("Your lessons and settings are still in", size=14,
                         fg=kit.colors["ink2"], wrap=300, y=48)

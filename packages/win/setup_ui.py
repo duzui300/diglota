@@ -22,27 +22,27 @@ from pathlib import Path
 # never introduces a color the reader will not meet again.
 PALETTES = {
     "paper": {
-        "page": "#f4efe6", "surface": "#fdfbf7", "ink": "#211d18",
-        "ink2": "#5c554b", "ink3": "#8b8375", "es": "#235e58",
-        "accent": "#1f8f6d", "primary": "#166f55", "primary_hover": "#105642",
-        "on_primary": "#ffffff", "line": "#e2d9c9",
+        "page": "#e8ebe0", "surface": "#f4f6ee", "ink": "#1f241e",
+        "ink2": "#4b5148", "ink3": "#5f6559", "es": "#1b5b52",
+        "accent": "#35506b", "primary": "#35506b", "primary_hover": "#2a4057",
+        "on_primary": "#f5f7f0", "on_destructive": "#f7f4ec", "line": "#cdd2c5",
     },
     "sepia": {
-        "page": "#ece0c8", "surface": "#f8f0dd", "ink": "#2a2216",
-        "ink2": "#6a5c42", "ink3": "#94856a", "es": "#1d534d",
-        "accent": "#1a8266", "primary": "#136049", "primary_hover": "#0e4a38",
-        "on_primary": "#ffffff", "line": "#ddcfae",
+        "page": "#e4d6bd", "surface": "#efe5d0", "ink": "#2a2419",
+        "ink2": "#574d3b", "ink3": "#6f644e", "es": "#1a544b",
+        "accent": "#334f6b", "primary": "#334f6b", "primary_hover": "#283f56",
+        "on_primary": "#f7f2e6", "on_destructive": "#f7f4ec", "line": "#c8b99a",
     },
     "night": {
-        "page": "#0f1114", "surface": "#15181c", "ink": "#e9e6df",
-        "ink2": "#a8a49a", "ink3": "#74716a", "es": "#7fc9b4",
-        "accent": "#2ea07f", "primary": "#2ea07f", "primary_hover": "#3fbf9a",
-        "on_primary": "#08110e", "line": "#2a2f36",
+        "page": "#151d17", "surface": "#1d251e", "ink": "#e9ede2",
+        "ink2": "#b4bbae", "ink3": "#98a08f", "es": "#7dc8b2",
+        "accent": "#a9c6ea", "primary": "#a9c6ea", "primary_hover": "#c3d8f2",
+        "on_primary": "#151d17", "on_destructive": "#f7f4ec", "line": "#39423a",
     },
 }
 
-DESTRUCTIVE = "#a33a2a"
-DESTRUCTIVE_HOVER = "#8a2f22"
+DESTRUCTIVE = "#9a3b2b"
+DESTRUCTIVE_HOVER = "#7e2f23"
 
 SERIF = "Palatino Linotype"
 SANS = "Segoe UI"
@@ -163,19 +163,19 @@ class Button(tk.Canvas):
             return fill, c["on_primary"], ""
         if self.kind == "destructive":
             fill = DESTRUCTIVE_HOVER if (self._hover or self._pressed) else DESTRUCTIVE
-            return fill, "#ffffff", ""
+            return fill, c["on_destructive"], ""
         if self.kind == "secondary":
             fill = c["surface"]
             outline = c["ink3"] if (self._hover or self._pressed) else c["line"]
             return fill, c["ink"], outline
         # ghost
-        fill = c["surface"] if (self._hover or self._pressed) else c["page"]
+        fill = c["page"]
         return fill, c["ink"] if self._hover else c["ink2"], ""
 
     def _draw(self) -> None:
         self.delete("all")
         fill, ink, outline = self._palette()
-        radius = self.kit.px(9)
+        radius = self.kit.px(2)
         focused = self.focus_get() is self
         # Focus is a halo, not an inner border: the fill shrinks a little and the
         # ring sits outside it with a breath of page between. An accent ring drawn
@@ -262,7 +262,7 @@ class Check(tk.Canvas):
         c = self.kit.colors
         inset = self.kit.px(2)
         top = (self._height - self._box) / 2
-        radius = self.kit.px(5)
+        radius = self.kit.px(2)
         if self.value:
             rounded(self, inset, top, self._box - inset, top + self._box, radius,
                     fill=c["accent"], outline=c["accent"])
@@ -292,7 +292,7 @@ class Check(tk.Canvas):
 class Progress(tk.Canvas):
     """A thin progress bar; no percentage inside it, the line below says the count."""
 
-    def __init__(self, master: tk.Misc, kit: Kit, width: int, height: int = 6) -> None:
+    def __init__(self, master: tk.Misc, kit: Kit, width: int, height: int = 4) -> None:
         self.kit = kit
         self._width = width
         self._height = kit.px(height)
@@ -304,7 +304,7 @@ class Progress(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         c = self.kit.colors
-        radius = self._height / 2
+        radius = 0
         rounded(self, 0, 0, self._width, self._height, radius, fill=c["line"])
         width = max(0, min(1.0, self._fraction)) * self._width
         if width >= self._height:

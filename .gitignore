@@ -21,3 +21,7 @@ dist/
 
 # Intermediate PNG make_icon.py writes before composing the .ico
 packages/win/assets/diglota-256.png
+
+# Hallmark run artefacts beside the design studies
+.hallmark/
+design/demos/.hallmark/

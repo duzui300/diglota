@@ -138,7 +138,7 @@ DEFAULT_LEVEL = "auto"
 # Presets for the amount slider, so the number has names as well as a value.
 AMOUNTS: tuple[tuple[str, float, str], ...] = (
     ("Light", 0.22, "short Spanish phrases inside comfortable English"),
-    ("Balanced", 0.38, "a real weave — the two languages trade off"),
+    ("Balanced", 0.38, "a real weave: the two languages trade off"),
     ("Strong", 0.52, "Spanish carries whole clauses; English scaffolds"),
     ("Immersion", 0.68, "Spanish-dominant; English for the hard parts only"),
 )
@@ -194,7 +194,7 @@ WEAVES: tuple[Weave, ...] = (
     Weave(
         code="chunk",
         name="Mixed, as it reads best",
-        blurb="The weaver picks the unit per sentence — a phrase, a clause, a whole sentence, "
+        blurb="The weaver picks the unit per sentence: a phrase, a clause, a whole sentence, "
               "and both languages may share one sentence. Denser practice per line, and the "
               "form that adapts most to the article.",
         instruction=(
@@ -305,25 +305,25 @@ def describe(level: Level, ratio: float, weave: "Weave | str | None" = None,
     resolved = resolve_weave(weave)
     if resolved.mixes_within_a_sentence:
         if ratio <= 0.26:
-            feel = "Easy going — the Spanish arrives in short, frequent bursts."
+            feel = "Easy going: the Spanish arrives in short, frequent bursts."
         elif ratio <= 0.44:
-            feel = "A genuine weave — roughly every other sentence turns over."
+            feel = "A genuine weave: roughly every other sentence turns over."
         elif ratio <= 0.58:
-            feel = "Demanding — Spanish holds the argument and English fills the gaps."
+            feel = "Demanding: Spanish holds the argument and English fills the gaps."
         else:
-            feel = "Immersion — you will be reading Spanish, with English for the hard parts."
+            feel = "Immersion: you will be reading Spanish, with English for the hard parts."
     else:
         # Sentence grain changes what the number means: the same share of words
         # arrives in fewer, larger pieces, and a reader is either in a Spanish
         # sentence or an English one.
         if ratio <= 0.26:
-            feel = "Easy going — a Spanish sentence every few lines, the rest untouched."
+            feel = "Easy going: a Spanish sentence every few lines, the rest untouched."
         elif ratio <= 0.44:
-            feel = "A genuine weave — you alternate between whole Spanish and English sentences."
+            feel = "A genuine weave: you alternate between whole Spanish and English sentences."
         elif ratio <= 0.58:
-            feel = "Demanding — most sentences are Spanish, and the English ones are the break."
+            feel = "Demanding: most sentences are Spanish, and the English ones are the break."
         else:
-            feel = "Immersion — nearly every sentence is Spanish."
+            feel = "Immersion: nearly every sentence is Spanish."
 
     if level.code == "auto":
         kind = f"The app will judge the level from the {what} itself."

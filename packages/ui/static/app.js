@@ -78,19 +78,49 @@ const store = {
 
 const prefs = {
   theme: store.get('theme', 'paper'),
+  pageColor: store.get('pageColor', ''),
   gloss: store.get('gloss', true),
   dim: store.get('dim', false),
   esOnly: store.get('esOnly', false),
   size: store.get('size', 19.5),
 };
 
+function relativeLuminance(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+  if (!match) return 0.6;
+  const value = parseInt(match[1], 16);
+  const channel = (part) => {
+    const c = part / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel((value >> 16) & 255)
+    + 0.7152 * channel((value >> 8) & 255)
+    + 0.0722 * channel(value & 255);
+}
+
+function pageTone(hex) {
+  return relativeLuminance(hex) < 0.18 ? 'dark' : 'light';
+}
+
+function themePageHex(theme) {
+  return { paper: '#e9ece0', sepia: '#e4d6bd', night: '#151d17' }[theme] || '#e9ece0';
+}
+
 function applyPrefs() {
   document.documentElement.dataset.theme = prefs.theme;
+  if (prefs.pageColor) {
+    document.documentElement.style.setProperty('--page', prefs.pageColor);
+    document.documentElement.dataset.pageTone = pageTone(prefs.pageColor);
+  } else {
+    document.documentElement.style.removeProperty('--page');
+    delete document.documentElement.dataset.pageTone;
+  }
   document.documentElement.style.setProperty('--reader-size', `${prefs.size}px`);
   document.body.classList.toggle('hide-gloss', !prefs.gloss);
   document.body.classList.toggle('dim-english', prefs.dim);
   document.body.classList.toggle('es-only', prefs.esOnly);
-  $$('.theme-switch button').forEach(b => b.classList.toggle('active', b.dataset.themeSet === prefs.theme));
+  $$('.theme-switch button').forEach(b => b.classList.toggle('active',
+    !prefs.pageColor && b.dataset.themeSet === prefs.theme));
   const g = $('#opt-gloss'), d = $('#opt-dim'), e = $('#opt-es-only');
   if (g) { g.checked = prefs.gloss; d.checked = prefs.dim; e.checked = prefs.esOnly; }
 }
@@ -153,14 +183,14 @@ function updateJob(job) {
     // background is that they have walked away from the dialog by now.
     if (job.status === 'done') {
       const detail = (job.kind === 'import' || job.kind === 'writing') && job.result
-        ? `${job.result.words} words · ${Math.round((job.result.spanish_ratio || 0) * 100)}% Spanish`
+        ? `${job.result.words} words, ${Math.round((job.result.spanish_ratio || 0) * 100)}% Spanish`
         : 'finished';
-      toast(`✓ ${job.title.slice(0, 60)} — ${detail}`, 'ok');
+      toast(`Done. ${cleanJobTitle(job.title).slice(0, 60)}. ${detail}`, 'ok');
       openLibraryIfIdle();
     } else if (job.status === 'failed') {
-      toast(`✕ ${job.title.slice(0, 50)} — ${(job.error || 'failed').slice(0, 140)}`, 'err');
+      toast(`Failed. ${cleanJobTitle(job.title).slice(0, 50)}. ${(job.error || 'failed').slice(0, 140)}`, 'err');
     } else {
-      toast(`Cancelled: ${job.title.slice(0, 50)}`);
+      toast(`Cancelled: ${cleanJobTitle(job.title).slice(0, 50)}`);
     }
   }
   void previous;
@@ -218,14 +248,28 @@ function renderActivity() {
 
 const JOB_LABEL = { import: 'Importing', recommend: 'Finding something to read',
                     writing: 'Weaving your writing' };
-const JOB_ICON = { running: '◐', queued: '○', done: '✓', failed: '✕', cancelled: '⊘' };
+const JOB_STATUS = { running: 'Working', queued: 'Waiting', done: 'Done',
+                     failed: 'Failed', cancelled: 'Cancelled' };
+
+/* Jobs made before the titles were cleaned still carry the old separators in
+   the database. Clean at the point of display so history reads like new work. */
+function cleanJobTitle(title) {
+  return String(title || '').replace(/\s+·\s+/g, ', ').replace(/\s+—\s+/g, '. ');
+}
+
+function elapsedText(seconds) {
+  const total = Math.round(seconds || 0);
+  if (total < 60) return `${total}s`;
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
 /* The four stages of a card's life, with the words and colours used wherever
    they are shown. One definition, because Progress and the deck page name the
    same four things and two lists of labels would drift. */
 const STAGE_ORDER = [['new', 'New', 'var(--stage-1)'], ['learning', 'Learning', 'var(--stage-2)'],
                      ['young', 'Young', 'var(--stage-3)'], ['mature', 'Mature', 'var(--stage-4)']];
-const STAGE_COLOR = Object.fromEntries(STAGE_ORDER.map(([key, , color]) => [key, color]));
 
 function jobCard(job) {
   const pct = Math.round((job.fraction || 0) * 100);
@@ -234,7 +278,7 @@ function jobCard(job) {
 
   let body = '';
   if (job.status === 'running') {
-    body = `<div class="job-step">${escapeHtml(job.step || 'working')}${job.detail ? ` · ${escapeHtml(job.detail)}` : ''}</div>
+    body = `<div class="job-step">${escapeHtml(job.step || 'working')}${job.detail ? `. ${escapeHtml(job.detail)}` : ''}</div>
       <div class="bar thin"><i style="width:${pct}%"></i></div>`;
   } else if (job.status === 'queued') {
     body = `<div class="job-step muted">waiting for a free worker</div>`;
@@ -250,8 +294,7 @@ function jobCard(job) {
     // an average, and an average over lumpy paragraphs describes no paragraph
     // the reader will actually meet.
     const uneven = (r.spread || 0) > 0.45
-      ? `<div class="job-step" style="color:var(--warn)">the Spanish is unevenly spread —
-           paragraphs differ by ${Math.round(r.spread * 100)} points</div>`
+      ? `<div class="job-step" style="color:var(--warn)">The Spanish is unevenly spread; paragraphs differ by ${Math.round(r.spread * 100)} points.</div>`
       : '';
     // Content that did not survive the weave is the one failure a reader cannot
     // notice for themselves, so it is worth saying out loud.
@@ -260,9 +303,9 @@ function jobCard(job) {
            only ${Math.round((r.retained || 0) * 100)}% of the source text survived the weave</div>`
       : '';
     body = r.words
-      ? `<div class="job-step">${r.words} words · ${Math.round((r.spanish_ratio || 0) * 100)}% Spanish
-           ${r.level ? ` · ${escapeHtml(r.level)}` : ''}
-           · ${(r.focus || []).length} focus phrases</div>${partial}${uneven}${lost}`
+      ? `<div class="job-step job-facts"><span>${r.words} words</span><span>${Math.round((r.spanish_ratio || 0) * 100)}% Spanish</span>
+           ${r.level ? `<span>${escapeHtml(r.level)}</span>` : ''}
+           <span>${(r.focus || []).length} focus phrases</span></div>${partial}${uneven}${lost}`
       : `<div class="job-step">${(r.candidates || []).length} candidates found</div>`;
   } else if (job.status === 'failed') {
     body = `<div class="job-step" style="color:var(--bad)">${escapeHtml((job.error || 'failed').slice(0, 200))}</div>`;
@@ -272,18 +315,17 @@ function jobCard(job) {
 
   return `<div class="job ${job.status}" data-job-id="${job.id}" data-job-status="${job.status}">
     <div class="job-head">
-      <span class="job-icon" title="${job.status}">${JOB_ICON[job.status] || '•'}</span>
-      <span class="job-title" title="${escapeHtml(job.title)}">${escapeHtml(job.title.slice(0, 90))}</span>
+      <span class="job-title" title="${escapeHtml(cleanJobTitle(job.title))}">${escapeHtml(cleanJobTitle(job.title).slice(0, 90))}</span>
       <span class="spacer"></span>
-      <span class="job-kind">${escapeHtml(JOB_LABEL[job.kind] || job.kind)}</span>
-      ${running ? `<button class="icon-btn" data-job-cancel="${job.id}" title="Stop this job">⊘</button>`
-                : `<button class="icon-btn" data-job-dismiss="${job.id}" title="Dismiss">✕</button>`}
+      <span class="job-kind ${job.status}">${JOB_STATUS[job.status] || escapeHtml(JOB_LABEL[job.kind] || job.kind)}</span>
+      ${running ? `<button class="icon-btn" data-job-cancel="${job.id}" title="Stop this job" aria-label="Stop this job">×</button>`
+                : `<button class="icon-btn" data-job-dismiss="${job.id}" title="Dismiss" aria-label="Dismiss this job">×</button>`}
     </div>
     ${body}
     ${slug ? `<div class="row" style="margin-top:8px">
-      <button class="btn sm primary" data-job-open="${escapeHtml(slug)}">Read it</button>
-      <span class="small muted">${Math.round(job.elapsed || 0)}s</span></div>`
-      : `<div class="small muted" style="margin-top:4px">${Math.round(job.elapsed || 0)}s</div>`}
+      <button class="btn sm" data-job-open="${escapeHtml(slug)}">Read it</button>
+      <span class="small muted">${elapsedText(job.elapsed)}</span></div>`
+      : `<div class="small muted" style="margin-top:4px">${elapsedText(job.elapsed)}</div>`}
   </div>`;
 }
 
@@ -533,7 +575,7 @@ function speak(text) {
   if (!window.speechSynthesis) { toast('This browser has no speech synthesis', 'err'); return; }
   stopReading();
   speechSynthesis.speak(utteranceFor(text, 'es'));
-  if (!spanishVoice) toast('No Spanish voice installed — using the default');
+  if (!spanishVoice) toast('No Spanish voice is installed. Using the default.');
 }
 
 /* selection toolbar -------------------------------------------------------- */
@@ -822,12 +864,12 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
     data.pos,
     data.display && data.display !== data.lemma ? `as “${data.display}”` : '',
     source,
-  ].filter(Boolean).join(' · ');
+  ].filter(Boolean).join(', ');
 
   const bits = [];
   if (data.looked_up_before > 1) {
-    bits.push(`<div class="nudge">You have looked this up ${data.looked_up_before} times —
-      it is probably worth saving.</div>`);
+    bits.push(`<div class="nudge">You have looked this up ${data.looked_up_before} times.
+      It is probably worth saving.</div>`);
   }
   if (data.gloss) bits.push(`<div class="gloss-big">${escapeHtml(data.gloss)}</div>`);
   if (data.sense) bits.push(`<div class="small muted">${escapeHtml(data.sense)}</div>`);
@@ -838,7 +880,7 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
       <div class="ex-en">${escapeHtml(data.example_en || '')}</div></div>`);
   }
   if (data.related && data.related.length) {
-    bits.push(`<div style="margin-top:9px" class="small muted">also: ${data.related.map(escapeHtml).join(' · ')}</div>`);
+    bits.push(`<div style="margin-top:9px" class="small muted">also: ${data.related.map(escapeHtml).join(', ')}</div>`);
   }
   // The connection that makes a collection worth keeping: you meet a word again
   // and the app shows you the sentences you chose it from. Shown here rather
@@ -849,7 +891,7 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
       <div class="small muted">In your quotes</div>
       ${data.quotes.slice(0, 2).map(quote => `<div class="pop-quote">${escapeHtml(
         quote.es.length > 96 ? `${quote.es.slice(0, 96)}…` : quote.es)}</div>`).join('')}
-      <a class="small" href="#/quotes">${data.quotes.length === 1 ? 'That sentence' : 'Those sentences'} →</a>
+      <a class="small" href="#/quotes">${data.quotes.length === 1 ? 'See that sentence' : 'See those sentences'}</a>
     </div>`);
   }
   if (provisional) {
@@ -859,7 +901,7 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
 
   if (provisional) {
     // Nothing to save yet: the model is about to return a lemma worth storing.
-    $('#pop-actions').innerHTML = '<button class="btn sm ghost" id="pop-say">🔊 Hear it</button>';
+    $('#pop-actions').innerHTML = '<button class="btn sm ghost" id="pop-say">Hear it</button>';
     $('#pop-say').addEventListener('click', () => speak(word));
     return;
   }
@@ -873,13 +915,13 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
   const fromCorpus = !data.model && !data.error;
   $('#pop-actions').innerHTML = `
     <button class="btn sm ${already ? '' : 'primary'}" id="pop-save" ${already ? 'disabled' : ''}>
-      ${already ? '✓ Saved' : '＋ Save word'}
+      ${already ? 'Saved' : 'Save word'}
     </button>
-    <button class="btn sm ghost" id="pop-say">🔊 Hear it</button>
+    <button class="btn sm ghost" id="pop-say">Hear it</button>
     ${fromCorpus
-      ? '<button class="btn sm ghost" id="pop-deep" title="Ask the tutor for the lemma, an example and a note">✨ Full entry</button>'
+      ? '<button class="btn sm ghost" id="pop-deep" title="Ask the tutor for the lemma, an example and a note">Full entry</button>'
       : ''}
-    <button class="btn sm ghost" id="pop-explain">💡 Explain</button>`;
+    <button class="btn sm ghost" id="pop-explain">Explain</button>`;
 
   if ($('#pop-deep')) {
     $('#pop-deep').addEventListener('click', () =>
@@ -902,15 +944,15 @@ function paintEntry(data, { word, sentence, slug, anchor, savedTerm, provisional
           lemma: data.lemma || data.term || word.toLowerCase(),
           gloss: data.gloss || null,
           pos: data.pos || null,
-          note: [data.sense, data.note].filter(Boolean).join(' — ') || null,
+          note: [data.sense, data.note].filter(Boolean).join('. ') || null,
           article_slug: slug,
           context: sentence,
         },
       });
-      $('#pop-save').textContent = '✓ Saved';
+      $('#pop-save').textContent = 'Saved';
       $('#pop-save').disabled = true;
       $$('.w').forEach(el => { if (el.dataset.word === (data.display || word)) el.classList.add('saved'); });
-      toast(`Saved “${data.lemma || word}” · ${result.total} words`);
+      toast(`Saved “${data.lemma || word}”. Your deck now holds ${result.total} words.`);
       refreshDuePill();
     } catch (err) { toast(err.message, 'err'); }
   });
@@ -957,7 +999,7 @@ let gradingInfo = null;
 
 function gradingNote() {
   if (!gradingInfo || gradingInfo.primary === 'jev') return '';
-  return `<div class="grading-note">No calibrated judge is configured — the tutor model
+  return `<div class="grading-note">No calibrated judge is configured. The tutor model
     grades these, so the scores are rougher than usual.</div>`;
 }
 
@@ -988,10 +1030,24 @@ let quoteTimer = null;
 
 const QUOTE_EMPTY = `<div class="empty"><h3>No sentences kept yet</h3>
   <p>Select a sentence while reading and press <strong>Keep</strong>. Sentences are what a
-  language is made of — a word on its own is a translation, but a sentence is the memory
+  language is made of. A word on its own is a translation, but a sentence is the memory
   of how it was used.</p>
   <p class="small muted">Keeping one costs nothing and calls no model, so it never
-  interrupts the reading.</p></div>`;
+  interrupts the reading.</p>
+  <p><a class="btn primary sm" href="#/library">Read something</a></p></div>
+  <section class="page-adjunct quote-adjunct">
+    <div class="adjunct-quote" aria-hidden="true">“</div>
+    <div class="adjunct-lead">
+      <h2>A sentence keeps the word in place.</h2>
+      <p>Keep the line when the phrase is one you would use, when the shape of the
+      grammar surprised you, or when its sound is worth coming back to.</p>
+    </div>
+    <div class="adjunct-list">
+      <p><strong>For the phrase.</strong> You can already hear yourself saying it.</p>
+      <p><strong>For the shape.</strong> A construction you had to stop and work out.</p>
+      <p><strong>For the sound.</strong> A line whose rhythm stayed after the page.</p>
+    </div>
+  </section>`;
 
 function quoteSpans(spans) {
   // The reader's own markup, so a sentence in the collection looks like the
@@ -1017,7 +1073,7 @@ async function viewQuotes() {
       <h1>Quotes</h1>
       <p id="quote-summary" class="muted"></p>
       <div class="field quote-search">
-        <input type="search" id="quote-q" placeholder="Search your sentences — in Spanish or English"
+        <input type="search" id="quote-q" placeholder="Search your sentences in Spanish or English"
                value="${escapeHtml(quoteSearch)}" aria-label="Search kept sentences">
       </div>
     </div>
@@ -1066,7 +1122,7 @@ async function loadQuotes() {
   }
   list.innerHTML = (quoteSearch || quoteSource !== 'all')
     ? `<div class="count-line">${data.quotes.length}
-        ${data.quotes.length === 1 ? 'sentence' : 'sentences'} match</div>`
+        ${data.quotes.length === 1 ? 'sentence matches' : 'sentences match'}</div>`
       + data.quotes.map(quoteCard).join('')
     : data.quotes.map(quoteCard).join('');
   wireQuoteCards(list);
@@ -1201,11 +1257,11 @@ async function renderChallenge() {
     return;
   }
   const justDone = challenge && challenge.completed_at && challenge.just_completed;
-  host.innerHTML = `${justDone ? `<div class="cheer">✓ ${escapeHtml(challenge.title)} — done.
+  host.innerHTML = `${justDone ? `<div class="cheer">${escapeHtml(challenge.title)} is done.
       ${challenge.done} ${escapeHtml(challenge.unit)}. That is the week.</div>` : ''}
     ${challenge && challenge.expired ? `<div class="cheer expired">That week ran out at
-      ${challenge.done} of ${challenge.target} ${escapeHtml(challenge.unit)}. No matter —
-      here is another.</div>` : ''}
+      ${challenge.done} of ${challenge.target} ${escapeHtml(challenge.unit)}. No matter.
+      Here is another.</div>` : ''}
     ${suggestCard(data.suggested, data.kinds)}`;
   wireSuggest(data.kinds);
 }
@@ -1266,7 +1322,7 @@ function wireSuggest(kinds) {
       await api('/api/challenge', { method: 'POST', body: {
         kind: kindSelect.value, target: Number(targetSelect.value),
       } });
-      toast('Started — a week from today');
+      toast('Started. A week from today.');
       await renderChallenge();
     } catch (err) { start.disabled = false; toast(err.message, 'err'); }
   });
@@ -1338,7 +1394,7 @@ async function viewWrite(pieceId) {
           <button class="btn ghost sm" id="write-another">Another prompt</button>
         </div>
         <textarea id="write-text" spellcheck="false"
-          placeholder="Escribe aquí. No busques las palabras — usa las que tienes."></textarea>
+          placeholder="Escribe aquí. No busques las palabras, usa las que tienes."></textarea>
         <div class="write-foot">
           <span class="small muted" id="write-count"></span>
           <span class="spacer"></span>
@@ -1366,7 +1422,27 @@ async function viewWrite(pieceId) {
         <section class="write-block" id="write-versions"></section>
         <section class="write-block" id="write-history"></section>
       </aside>
-    </div>`;
+    </div>
+    <section class="page-adjunct write-adjunct">
+      <div class="adjunct-lead">
+        <h2>From draft to lesson</h2>
+        <p>A draft becomes a lesson in three passes.</p>
+      </div>
+      <div class="write-diagram" role="img" aria-label="A draft, checked, then woven into a lesson">
+        <div class="diagram-step">
+          <span class="diagram-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="diagram-label">Draft</span>
+        </div>
+        <div class="diagram-step">
+          <span class="diagram-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="diagram-label">Checked</span>
+        </div>
+        <div class="diagram-step">
+          <span class="diagram-lines" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="diagram-label">Lesson</span>
+        </div>
+      </div>
+    </section>`;
 
   writeState = { pieceId: pieceId || null, prompt: null, modes: [], checked: null,
                  marks: [], timers: {} };
@@ -1443,7 +1519,7 @@ async function measureDraft() {
       `${reading.sentences || 0} sentences`,
       `<strong>${Math.round((reading.spanish_share || 0) * 100)}%</strong> Spanish`,
       reading.enough ? '' : 'aim for 40–120',
-    ].filter(Boolean).join(' · ');
+    ].filter(Boolean).join(', ');
   } catch {
     // The count is a convenience; a failed measure should not become an error.
     $('#write-count').textContent = `${words} words`;
@@ -1591,7 +1667,7 @@ function startOver() {
   $('#write-text').dispatchEvent(new Event('input'));
   $('#write-annotated').innerHTML = '';
   $('#write-suggestion').innerHTML = '';
-  toast('Cleared — the versions you kept are still there');
+  toast('Cleared. The versions you kept are still there.');
 }
 
 /* -- writing your own lessons ---------------------------------------------- */
@@ -1653,7 +1729,7 @@ async function readFileIn(input) {
 async function openLesson() {
   const text = $('#write-text').value.trim();
   if (text.split(/\s+/).filter(Boolean).length < 40) {
-    toast('Write a few sentences first — a lesson needs something to weave');
+    toast('Write a few sentences first. A lesson needs something to weave.');
     return;
   }
   let options;
@@ -1666,12 +1742,12 @@ async function openLesson() {
   openModal('Make a lesson from this', `
     <p class="small muted" style="margin-top:0">Your piece is put into English if it is not
     already, then woven into Spanish with the settings below. It joins your library like any
-    other lesson — same reader, same notes, same cards — and this draft is kept as a version
+    other lesson, with the same reader, notes and cards. This draft is kept as a version
     of the piece first, so the lesson refers back to something you can see.</p>
     <p class="small" id="lesson-note"></p>
     ${importControlsHtml(options)}
     <div class="row"><button class="btn primary" id="lesson-go">Weave it into Spanish</button>
-      <span class="small muted">It runs in the background — you can close this.</span></div>
+      <span class="small muted">It runs in the background. You can close this.</span></div>
     <div id="import-job"></div>`);
 
   // "the article" is what the shared controls say by default; the piece in front
@@ -1705,7 +1781,7 @@ async function openLesson() {
       $('#import-job').innerHTML = `<div data-job-detail="${response.job_id}" style="margin-top:16px"></div>`;
       const job = await api(`/api/jobs/${response.job_id}`);
       updateJob(job);
-      button.textContent = 'Weaving — you can close this';
+      button.textContent = 'Weaving. You can close this';
       button.classList.remove('primary');
     } catch (err) {
       toast(err.message, 'err');
@@ -1745,7 +1821,7 @@ function markStale() {
   if (!shown) { host.innerHTML = ''; return; }
   const edited = $('#write-text').value.trim() !== String(shown.text || '').trim();
   host.innerHTML = edited
-    ? '<div class="small muted write-stale">You have edited since this version was read — '
+    ? '<div class="small muted write-stale">You have edited since this version was read. '
       + 'check again to see what changed.</div>'
     : '';
 }
@@ -1765,7 +1841,7 @@ function applyRevision(revision, extra = {}) {
     `<strong>${reading.words || 0}</strong> words`,
     `${reading.sentences || 0} sentences`,
     `<strong>${Math.round((reading.spanish_share || 0) * 100)}%</strong> Spanish`,
-  ].join(' · ');
+  ].join(', ');
   $('#write-feedback').innerHTML = feedbackPanel(
     reading, verdict, feedback, note, revision.checked !== false);
   $('#write-annotated').innerHTML = annotatedPanel(revision.text, feedback);
@@ -1787,8 +1863,8 @@ function wireSaveWords(feedback, text) {
         term: item.should_be, note: item.why || null,
         context: item.their_text || String(text || '').slice(0, 200),
       }});
-      button.textContent = '✓ Saved';
-      toast(`Saved “${item.should_be}” · ${saved.total} words`);
+      button.textContent = 'Saved';
+      toast(`Saved “${item.should_be}”. Your deck now holds ${saved.total} words.`);
       refreshDuePill();
     } catch (err) { button.disabled = false; toast(err.message, 'err'); }
   }));
@@ -1824,7 +1900,7 @@ function feedbackPanel(reading, verdict, feedback, note, checked) {
       ? `<p class="small muted">${escapeHtml(feedback.summary || '')}</p>`
       : (feedback.summary ? `<p>${escapeHtml(feedback.summary)}</p>` : '')}
     ${loads ? `<ul class="corrections">${loads}</ul>` : ''}
-    ${feedback.praise ? `<p class="small">👍 ${escapeHtml(feedback.praise)}</p>` : ''}
+    ${feedback.praise ? `<p class="small">${escapeHtml(feedback.praise)}</p>` : ''}
     ${feedback.next ? `<p class="small muted">Next time: ${escapeHtml(feedback.next)}</p>` : ''}
     ${verdict.model ? `<p class="small muted">read by ${escapeHtml(verdict.model)}${
       verdict.latency_ms ? ` in ${verdict.latency_ms} ms` : ''}</p>` : ''}`;
@@ -1875,7 +1951,7 @@ function annotatedPanel(text, feedback) {
   const good = placed.filter(m => m.kind === 'good').length;
   const bad = placed.length - good;
   return `<div class="write-annotated">
-    <div class="small muted">What the tutor saw — ${bad} to look at${
+    <div class="small muted">What the tutor saw: ${bad} to look at${
       good ? `, ${good} worth keeping` : ''}. Click any mark.</div>
     <p class="annotated-text">${html}</p>
   </div>`;
@@ -1927,7 +2003,7 @@ async function improveDraft(mode, button) {
     } else {
       host.innerHTML = `<div class="suggestion">
         <div class="small muted">${escapeHtml(suggestion.label || '')}${
-          suggestion.changed ? ` — ${escapeHtml(suggestion.changed)}` : ''}</div>
+          suggestion.changed ? `. ${escapeHtml(suggestion.changed)}` : ''}</div>
         <p class="annotated-text">${escapeHtml(suggestion.revision)}</p>
         <div class="row">
           <button class="btn primary sm" id="write-use">Use as my next draft</button>
@@ -1967,9 +2043,9 @@ function renderVersions(piece) {
       const current = writeState.checked && writeState.checked.id === revision.id;
       return `<button class="version ${current ? 'current' : ''}" data-revision="${revision.id}">
         <span class="v-label">${escapeHtml(revision.label || 'Draft')}</span>
-        <span class="v-meta">${(revision.created_at || '').slice(0, 10)} · ${reading.words || 0} words · ${
+        <span class="v-meta">${(revision.created_at || '').slice(0, 10)}, ${reading.words || 0} words, ${
           Math.round((reading.spanish_share || 0) * 100)}% Spanish${
-          revision.checked && verdict.score != null ? ` · ${Number(verdict.score).toFixed(1)}/4` : ' · not read'}</span>
+          revision.checked && verdict.score != null ? `, ${Number(verdict.score).toFixed(1)}/4` : ', not read'}</span>
       </button>`;
     }).join('')}</div>`;
   $$('[data-revision]', host).forEach(button => button.addEventListener('click', () => {
@@ -1990,7 +2066,7 @@ async function loadWritings() {
   const totals = data.totals || {};
   $('#write-summary').textContent = totals.pieces
     ? `${totals.pieces} piece${totals.pieces === 1 ? '' : 's'}, ${totals.revisions} version${
-        totals.revisions === 1 ? '' : 's'} · ${totals.words} words written, ${
+        totals.revisions === 1 ? '' : 's'}, ${totals.words} words written, ${
         Math.round((totals.spanish_share || 0) * 100)}% of them Spanish.`
     : 'Nothing written yet. The prompt is drawn from what you have been reading and looking up.';
   if (!writeState.prompt && data.prompt) {
@@ -2007,10 +2083,10 @@ async function loadWritings() {
         <div class="piece" data-piece="${piece.id}">
           <button class="piece-open">
             <span class="p-title">${escapeHtml(piece.title || piece.excerpt || 'Untitled')}</span>
-            <span class="p-meta">${(piece.updated_at || '').slice(0, 10)} · ${
-              piece.revision_count} version${piece.revision_count === 1 ? '' : 's'} · ${
+            <span class="p-meta">${(piece.updated_at || '').slice(0, 10)}, ${
+              piece.revision_count} version${piece.revision_count === 1 ? '' : 's'}, ${
               piece.words} words${piece.verdict && piece.verdict.score != null
-                ? ` · ${Number(piece.verdict.score).toFixed(1)}/4` : ''}</span>
+                ? `, ${Number(piece.verdict.score).toFixed(1)}/4` : ''}</span>
           </button>
           <button class="btn ghost sm" data-drop="${piece.id}" title="Delete this piece and its versions">×</button>
         </div>`).join('')}</div>`
@@ -2053,8 +2129,8 @@ let libraryFilter = store.get('libraryFilter', 'all');
 let registerFilter = store.get('registerFilter', 'all');
 
 const REGISTER_LABELS = {
-  news: '📰 News', essay: '📚 Essay', conversation: '💬 Conversation',
-  academic: '🎓 Academic', fiction: '📖 Fiction', unspecified: 'Other',
+  news: 'News', essay: 'Essay', conversation: 'Conversation',
+  academic: 'Academic', fiction: 'Fiction', unspecified: 'Other',
 };
 
 // The taxonomy's order, so the filter row does not reshuffle as the library
@@ -2101,7 +2177,7 @@ function libraryShelvesHtml(articles, query) {
   if (!articles.length) {
     if (query) {
       return `<div class="empty"><h3>Nothing matches “${escapeHtml(query)}”</h3>
-        <p>Searched titles, authors, sources, levels and registers — not the text of
+        <p>Searched titles, authors, sources, levels and registers, but not the text of
         the lessons themselves.</p>
         <p style="margin-top:14px"><button class="btn ghost sm" id="library-search-clear">
           Clear the search</button></p></div>`;
@@ -2123,6 +2199,76 @@ function libraryShelvesHtml(articles, query) {
       <p class="shelf-desc">${escapeHtml(group[0].shelf_description || '')}</p>
       <div class="grid">${group.map(articleCard).join('')}</div>
     </section>`).join('');
+}
+
+function shortenText(text, max) {
+  const value = String(text || '');
+  if (value.length <= max) return value;
+  return `${value.slice(0, max).replace(/\s+\S*$/, '')}…`;
+}
+
+/* The one lesson the library puts forward. A part-read piece wins, because the
+   kindest next step is usually the one already begun; then the first unread one.
+   Picking by shelf order instead would send a reader back to the top of the
+   library every evening. */
+function nextLesson(articles) {
+  return articles.find(article => {
+    const progress = article.progress || {};
+    return progress.position > 0.02 && !progress.completed;
+  }) || articles.find(article => !(article.progress || {}).completed) || articles[0];
+}
+
+function featuredLessonHtml(article, allRead) {
+  const coverage = article.coverage || {};
+  const text = coverage.text || {};
+  const known = Math.round((text.token_ratio || 0) * 100);
+  const ratio = Math.round(article.stats.spanish_ratio * 100);
+  const progress = article.progress || {};
+  const band = coverage.band || 'immersion';
+  const started = progress.position > 0.02 && !progress.completed;
+  const hasDeck = (text.types || 0) > 0 && known > 0;
+  const advice = coverage.advice || '';
+  const heading = allRead ? 'Everything here is read'
+    : started ? 'Pick up where you left off'
+    : 'The next lesson';
+  const note = allRead
+    ? 'Nothing on the shelves is unread. This is a good one to come back to.'
+    : started
+      ? 'You were partway through this one, and a little further is a fair place to stop.'
+      : 'The first lesson here you have not opened. Its shelf says how much Spanish it asks of you.';
+  return `<section class="library-feature" aria-labelledby="feature-title">
+    <a class="cover" href="#/read/${encodeURIComponent(article.slug)}">
+      <div>
+        <h2>${escapeHtml(article.title)}</h2>
+        ${article.author ? `<div class="byline">${escapeHtml(article.author)}</div>` : ''}
+        <div class="cover-meta">
+          <span>${ratio}% Spanish</span>
+          <span>${article.stats.words} words</span>
+          ${article.level ? `<span>${escapeHtml(article.level)}</span>` : ''}
+          ${article.register && article.register !== 'unspecified'
+            ? `<span>${escapeHtml(REGISTER_LABELS[article.register] || article.register)}</span>` : ''}
+        </div>
+      </div>
+      ${article.preview ? `<p class="cover-quote">“${escapeHtml(shortenText(article.preview, 130))}”</p>` : '<span></span>'}
+      <div class="cover-foot">
+        ${hasDeck ? `<span class="chip">${known}% of the Spanish known</span>` : '<span></span>'}
+        ${progress.completed
+          ? '<span class="complete-tick">Read</span>'
+          : started
+            ? `<span class="bar" title="Where you left off"><i style="width:${Math.round(progress.position * 100)}%"></i></span>`
+            : ''}
+      </div>
+    </a>
+    <div class="feature-side">
+      <h2 id="feature-title">${heading}</h2>
+      <p>${escapeHtml(note)}${advice ? ` ${escapeHtml(advice)}` : ''}</p>
+      ${hasDeck ? `<div class="read-line">
+        <span class="read-label">${known}% of the Spanish known</span>
+        <span class="bar band-${escapeHtml(band)}" title="${escapeHtml(advice)}"><i style="width:${Math.min(known, 100)}%"></i></span>
+      </div>` : ''}
+      <a class="btn primary" href="#/read/${encodeURIComponent(article.slug)}">${allRead ? 'Read it again' : 'Open the next lesson'}</a>
+    </div>
+  </section>`;
 }
 
 async function viewLibrary() {
@@ -2161,31 +2307,39 @@ async function viewLibrary() {
 
   const readCount = counts.finished;
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const candidate = nextLesson(data.articles);
+  const allRead = data.articles.every(article => (article.progress || {}).completed);
   const parts = [`<div class="page-head">
       <h1>Your library</h1>
-      <p>${plural(data.articles.length, 'article', 'articles')} ·
-      ${readCount} finished · ${plural(data.words, 'word', 'words')} saved.
-      Shelves run from mostly-English to Spanish-dominant, so you can pick the next thing you can actually read.</p>
-      <div class="row" style="margin-top:10px">
-        <button class="btn ghost sm" id="btn-open-share"
-                title="A diglot .md file someone sent you">Open a shared lesson</button>
-      </div>
+      <p class="library-summary">
+        <span>${plural(data.articles.length, 'article', 'articles')}</span>
+        <span>${readCount} finished</span>
+        <span>${plural(data.words, 'word', 'words')} saved</span>
+      </p>
+      <p class="library-note">Shelves run from mostly-English to Spanish-dominant, so you can pick the next thing you can actually read.</p>
     </div>`];
 
-  parts.push(`<div class="row filter-row" role="group" aria-label="Filter articles">
-    ${SHELF_FILTERS.map(([key, label]) => `
-      <button class="choice sm ${key === libraryFilter ? 'active' : ''}" data-filter="${key}">
-        ${label} <span class="muted">${counts[key]}</span>
-      </button>`).join('')}
-    <span class="spacer"></span>
-    <span class="small muted" id="library-match"></span>
-    <input type="search" id="library-search" class="library-search"
-           placeholder="Search titles, authors, sources…" aria-label="Search the library"
-           value="${escapeHtml(libraryQuery)}">
+  parts.push(featuredLessonHtml(candidate, allRead));
+
+  parts.push(`<div class="library-toolbar">
+    <div class="row filter-row" role="group" aria-label="Filter articles">
+      ${SHELF_FILTERS.map(([key, label]) => `
+        <button class="choice sm ${key === libraryFilter ? 'active' : ''}" data-filter="${key}">
+          ${label} <span class="muted">${counts[key]}</span>
+        </button>`).join('')}
+    </div>
+    <div class="library-tools">
+      <span class="small muted" id="library-match" aria-live="polite"></span>
+      <input type="search" id="library-search" class="library-search"
+             placeholder="Search titles, authors, sources…" aria-label="Search the library"
+             value="${escapeHtml(libraryQuery)}">
+      <button class="btn ghost sm" id="btn-open-share"
+              title="A diglot .md file someone sent you">Open a shared lesson</button>
+    </div>
   </div>`);
 
   if (presentRegisters.length > 1) {
-    parts.push(`<div class="row filter-row" role="group" aria-label="Filter by register">
+    parts.push(`<div class="row filter-row register-row" role="group" aria-label="Filter by register">
       <button class="choice sm ${registerFilter === 'all' ? 'active' : ''}" data-register="all">
         Every register</button>
       ${presentRegisters.map(code => `
@@ -2196,11 +2350,13 @@ async function viewLibrary() {
     </div>`);
   }
 
+  parts.push(`<div id="library-shelves">${libraryShelvesHtml(shown, query)}</div>`);
+
   if ((data.worth_saving || []).length && libraryFilter === 'all') {
     parts.push(`<div class="panel worth">
       <h3>Words you keep looking up</h3>
-      <p class="panel-sub">You have looked these up more than once and not saved them yet —
-        which usually means they have not stuck.</p>
+      <p class="panel-sub">You have looked these up more than once and not saved them yet.
+        That usually means they have not stuck.</p>
       <div class="row">
         ${data.worth_saving.map(word => `<button class="btn sm" data-worth="${escapeHtml(word.lemma)}"
             data-gloss="${escapeHtml(word.gloss || '')}" data-term="${escapeHtml(word.term)}"
@@ -2211,7 +2367,6 @@ async function viewLibrary() {
     </div>`);
   }
 
-  parts.push(`<div id="library-shelves">${libraryShelvesHtml(shown, query)}</div>`);
   view.innerHTML = parts.join('');
 
   const openShare = $('#btn-open-share', view);
@@ -2231,7 +2386,15 @@ async function viewLibrary() {
      shelves and the cards inside them are new elements that have never been
      wired. */
   const wireCards = (scope) => {
-  $$('.card', scope).forEach(card => card.addEventListener('click', () => { location.hash = `#/read/${card.dataset.slug}`; }));
+  $$('.card', scope).forEach(card => {
+    card.addEventListener('click', () => { location.hash = `#/read/${card.dataset.slug}`; });
+    card.addEventListener('keydown', (event) => {
+      if (event.target !== card) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      location.hash = `#/read/${card.dataset.slug}`;
+    });
+  });
   $$('[data-remove-lesson]', view).forEach(button => button.addEventListener('click', async (event) => {
     event.stopPropagation();
     // Two clicks rather than a dialog: the file it deletes cannot be got back, and
@@ -2253,7 +2416,7 @@ async function viewLibrary() {
     try {
       const result = await api(`/api/article/${encodeURIComponent(button.dataset.removeLesson)}`,
                                { method: 'DELETE' });
-      toast(`Removed · your ${result.words_kept} saved words stay in the deck`);
+      toast(`Removed. Your ${result.words_kept} saved words stay in the deck.`);
       viewLibrary();
     } catch (err) {
       button.disabled = false;
@@ -2323,8 +2486,8 @@ async function viewLibrary() {
         },
       });
       button.disabled = true;
-      button.innerHTML = `✓ ${escapeHtml(button.dataset.term)}`;
-      toast(`Saved · ${result.total} words`);
+      button.innerHTML = `${escapeHtml(button.dataset.term)} saved`;
+      toast(`Saved. Your deck now holds ${result.total} words.`);
       refreshDuePill();
     } catch (err) { toast(err.message, 'err'); }
   }));
@@ -2338,10 +2501,10 @@ function articleCard(article) {
   const progress = article.progress;
   const band = coverage.band || 'immersion';
   const hasDeck = (text.types || 0) > 0 && known > 0;
-  return `<article class="card" data-slug="${escapeHtml(article.slug)}">
+  return `<article class="card" data-slug="${escapeHtml(article.slug)}" tabindex="0" role="link">
     <h3>${escapeHtml(article.title)}</h3>
     ${article.author ? `<div class="byline">${escapeHtml(article.author)}</div>` : ''}
-    ${article.preview ? `<p class="preview">${escapeHtml(article.preview)}</p>` : ''}
+    ${article.preview ? `<p class="preview">${escapeHtml(shortenText(article.preview, 90))}</p>` : ''}
     <div class="meta">
       <span class="chip">${ratio}% Spanish</span>
       <span class="chip">${article.stats.words} words</span>
@@ -2352,13 +2515,13 @@ function articleCard(article) {
       ${hasDeck ? `<span class="chip accent" title="${escapeHtml(coverage.advice || '')}">
         ${known}% of Spanish known</span>` : ''}
       ${article.imported ? '<span class="chip imported">imported</span>' : ''}
-      ${progress.completed ? '<span class="complete-tick">✓ read</span>' : ''}
+      ${progress.completed ? '<span class="complete-tick">Read</span>' : ''}
     </div>
     ${hasDeck ? `<div class="bar thin band-${band}"
         title="${known}% of the Spanish words in this article are already in your deck">
       <i style="width:${Math.min(known, 100)}%"></i></div>` : ''}
     ${!progress.completed && progress.position > 0.02
-      ? `<div class="bar thin" title="Where you left off"><i style="width:${Math.round(progress.position * 100)}%;background:var(--focus-line)"></i></div>` : ''}
+      ? `<div class="bar thin" title="Where you left off"><i style="width:${Math.round(progress.position * 100)}%"></i></div>` : ''}
     ${article.imported ? `<div class="card-foot">
       <button class="btn ghost xs danger-hover" data-remove-lesson="${escapeHtml(article.slug)}"
               title="Delete this lesson's file and its reading progress. Words you saved from it stay in your deck.">Remove</button>
@@ -2404,13 +2567,16 @@ async function viewReader(slug) {
         <div class="article-head">
           <h1>${escapeHtml(article.title)}</h1>
           ${article.author ? `<div class="byline">${escapeHtml(article.author)}</div>` : ''}
-          ${article.url ? `<div class="source"><a href="${escapeHtml(article.url)}" target="_blank" rel="noopener">${escapeHtml(hostOf(article.url))} ↗</a>
-            · ${article.stats.words} words · ${Math.round(article.stats.spanish_ratio * 100)}% Spanish</div>` : ''}
+          <div class="source">
+            ${article.url ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener">${escapeHtml(hostOf(article.url))}</a>` : ''}
+            <span>${article.stats.words} words</span>
+            <span>${Math.round(article.stats.spanish_ratio * 100)}% Spanish</span>
+          </div>
           <div class="register-note" id="register-note"></div>
           ${text.types && knownPct > 0 ? `<div class="coverage-line band-${escapeHtml(coverage.band || '')}">
-            <strong>${knownPct}%</strong> of the Spanish words here are already in your deck —
+            <strong>${knownPct}%</strong> of the Spanish words here are already in your deck.
             ${escapeHtml(coverage.advice || '')}
-            ${(text.unknown || []).length ? `<div class="unknown-words">New to you:
+            ${(text.unknown || []).length ? `<div class="unknown-words"><span class="muted">New to you</span>
               ${text.unknown.slice(0, 10).map(word => `<span class="chip" data-look="${escapeHtml(word)}">${escapeHtml(word)}</span>`).join('')}
             </div>` : ''}
           </div>` : ''}
@@ -2422,7 +2588,7 @@ async function viewReader(slug) {
             <button class="btn primary" id="btn-quiz">Comprehension questions</button>
             <button class="btn" id="btn-drills">Translate into Spanish</button>
             <span class="spacer"></span>
-            <button class="btn" id="btn-done">${article.progress.completed_at ? '✓ Finished' : 'Mark as finished'}</button>
+            <button class="btn" id="btn-done">${article.progress.completed_at ? 'Finished' : 'Mark as finished'}</button>
           </div>
           <div class="share-row">
             <input id="share-name" class="share-name" placeholder="your name (optional)"
@@ -2470,7 +2636,7 @@ function paintRegister(slug, article) {
       : ''}
     ${editable
       ? `<button class="btn ghost sm" data-set-register="${escapeHtml(slug)}">${known ? 'Change' : 'Set it'}</button>`
-      : '<span class="small muted" title="This file holds several passages, and the app cannot tell which one a tag in it would belong to">set in the file — this one holds several passages</span>'}`;
+      : '<span class="small muted" title="This file holds several passages, and the app cannot tell which one a tag in it would belong to">set in the file; this one holds several passages</span>'}`;
   const button = $('[data-set-register]', host);
   if (button) button.addEventListener('click', () => openRegisterPicker(slug, known ? code : ''));
 }
@@ -2488,7 +2654,7 @@ async function openRegisterPicker(slug, current) {
     <p class="small muted" style="margin-top:0">Some passages declare their own kind in the file they
     came from; the rest are guessed from how they are written, and the guess is marked <em>inferred</em>.
     Whatever you choose here is written into the passage's file, so it stays right if the file is moved
-    or shared — and a passage you wrote yourself keeps its every other word.</p>
+    or shared. A passage you wrote yourself keeps its every other word.</p>
     <div class="register-choices">
       ${registerOptions.map(option => `
         <button type="button" class="choice ${option.code === current ? 'active' : ''}"
@@ -2510,7 +2676,7 @@ async function openRegisterPicker(slug, current) {
       closeModal();
       toast(fresh.register
         ? `Marked as ${REGISTER_LABELS[fresh.register] || fresh.register}`
-        : 'Tag removed — the app will guess');
+        : 'Tag removed. The app will guess');
       // Painted in place rather than by re-rendering the reader: a re-render
       // drops the reader back to their last saved position, which for a change
       // this small is a page of lost reading.
@@ -2694,13 +2860,17 @@ function renderRail(article) {
     ${toc}
     ${focus.length ? `<section><h4>Focus vocabulary</h4>${focus.map(f => `
       <div class="vocab-item">
-        <div><div class="t">${escapeHtml(f.es)}</div><div class="g">${escapeHtml(f.en || '')}</div></div>
-        <button class="icon-btn add" title="Save to your deck" data-save-term="${escapeHtml(f.es)}" data-save-gloss="${escapeHtml(f.en || '')}">＋</button>
+        <div class="vocab-body">
+          <div class="vocab-line"><span class="t">${escapeHtml(f.es)}</span> <span class="g">${escapeHtml(f.en || '')}</span></div>
+        </div>
+        <button class="btn ghost xs add" title="Save to your deck" aria-label="Save ${escapeHtml(f.es)} to your deck" data-save-term="${escapeHtml(f.es)}" data-save-gloss="${escapeHtml(f.en || '')}">Save</button>
       </div>`).join('')}</section>` : ''}
     ${vocab.length ? `<section><h4>Recycled vocabulary</h4>${vocab.map(v => `
       <div class="vocab-item">
-        <div><div class="t">${escapeHtml(v.term)}</div><div class="g">${escapeHtml(v.gloss || '')}</div>
-        ${(v.examples || []).length ? `<div class="g" style="margin-top:4px">${mdInline(v.examples[0])}</div>` : ''}</div>
+        <div class="vocab-body">
+          <div class="vocab-line"><span class="t">${escapeHtml(v.term)}</span> <span class="g">${escapeHtml(v.gloss || '')}</span></div>
+          ${(v.examples || []).length ? `<div class="g vocab-example">${mdInline(v.examples[0])}</div>` : ''}
+        </div>
       </div>`).join('')}</section>` : ''}
     ${grammar.length ? `<section><h4>Grammar</h4>${grammar.map(g => `
       <div class="grammar-note"><strong>${mdInline(g.title)}</strong>
@@ -2736,9 +2906,9 @@ function wireReader(article) {
           article_slug: slug,
         },
       });
-      button.textContent = '✓';
+      button.textContent = 'Saved';
       button.disabled = true;
-      toast(`Saved “${button.dataset.saveTerm}” · ${result.total} words`);
+      toast(`Saved “${button.dataset.saveTerm}”. Your deck now holds ${result.total} words.`);
       refreshDuePill();
     } catch (err) { toast(err.message, 'err'); }
   }));
@@ -2755,7 +2925,7 @@ function wireReader(article) {
   $('#btn-drills').addEventListener('click', () => loadExercises(slug, 'drills'));
   $('#btn-done').addEventListener('click', async () => {
     await api(`/api/article/${slug}/progress`, { method: 'POST', body: { completed: true, position: 1 } });
-    $('#btn-done').textContent = '✓ Finished';
+    $('#btn-done').textContent = 'Finished';
     toast('Marked as finished');
   });
   $('#btn-share').addEventListener('click', () => downloadShare(slug));
@@ -2844,7 +3014,7 @@ async function loadExercises(slug, kind) {
   const host = $('#exercises');
   host.innerHTML = `<div class="empty"><span class="spinner"></span>
     <div class="small muted" style="margin-top:10px">${kind === 'quiz'
-      ? 'writing comprehension questions in Spanish' : 'building translation drills'} — this takes a moment the first time</div></div>`;
+      ? 'writing comprehension questions in Spanish' : 'building translation drills'}. This takes a moment the first time.</div></div>`;
 
   let data;
   try {
@@ -2861,7 +3031,7 @@ async function loadExercises(slug, kind) {
         <span class="focus-chip">Question ${i + 1} of ${data.questions.length}</span>
         <div class="q">${escapeHtml(q.question)}</div>
         ${q.hint ? `<div class="small muted" style="margin-bottom:9px">hint: ${escapeHtml(q.hint)}</div>` : ''}
-        <textarea placeholder="Answer in Spanish — or in English if you are stuck"></textarea>
+        <textarea placeholder="Answer in Spanish, or in English if you are stuck"></textarea>
         <div class="row" style="margin-top:9px">
           <button class="btn primary sm" data-check>Check answer</button>
           <button class="btn ghost sm" data-reveal>Show a model answer</button>
@@ -2879,7 +3049,7 @@ async function loadExercises(slug, kind) {
     if (!data.drills.length) { host.innerHTML = '<div class="empty">No drills were generated.</div>'; return; }
     host.innerHTML = gradingNote() + data.drills.map((d, i) => `
       <div class="exercise" data-kind="translate" data-index="${i}">
-        <span class="focus-chip">${escapeHtml(d.focus || 'translation')}${d.vocabulary && d.vocabulary.length ? ` · ${d.vocabulary.map(escapeHtml).join(', ')}` : ''}</span>
+        <span class="focus-chip">${escapeHtml(d.focus || 'translation')}${d.vocabulary && d.vocabulary.length ? `, ${d.vocabulary.map(escapeHtml).join(', ')}` : ''}</span>
         <div class="q">${escapeHtml(d.en)}</div>
         <textarea placeholder="Write it in Spanish"></textarea>
         <div class="row" style="margin-top:9px">
@@ -2954,7 +3124,7 @@ function renderVerdict(result, kind, item) {
     : '';
   const scoreLine = verdict.score != null
     ? `<div class="small muted" style="margin-top:6px">overall ${verdict.score.toFixed(1)} / ${verdict.score_max}
-       ${gradedBy ? ` · ${gradedBy}` : ''}</div>`
+       ${gradedBy ? `, ${gradedBy}` : ''}</div>`
     : (gradedBy ? `<div class="small muted" style="margin-top:6px">${gradedBy}</div>` : '');
 
   const corrections = (feedback.corrections || []).length ? `
@@ -2982,12 +3152,12 @@ function renderVerdict(result, kind, item) {
     <div class="headline">${headline}</div>
     ${provisional ? `<div class="small muted">No judgment model is configured, so this was
       compared word by word against the article. An unusual but correct answer cannot be
-      recognised this way — judge it yourself.</div>` : ''}
+      recognised this way. Judge it yourself.</div>` : ''}
     ${verdict.error ? `<div class="small muted">${escapeHtml(verdict.error)}</div>` : ''}
     <div class="meters">${meters}</div>
     ${scoreLine}
     ${corrections}
-    ${feedback.praise ? `<div class="small" style="margin-top:8px">👍 ${escapeHtml(feedback.praise)}</div>` : ''}
+    ${feedback.praise ? `<div class="small" style="margin-top:8px">${escapeHtml(feedback.praise)}</div>` : ''}
     ${feedback.better ? `<div style="margin-top:10px"><div class="small muted">A natural rendering</div>
       <div style="font-family:var(--serif);color:var(--es-ink);font-size:15px">${escapeHtml(feedback.better)}</div></div>` : ''}
     <div style="margin-top:10px"><div class="small muted">${kind === 'translate' ? "The article's version" : 'Model answer'}</div>
@@ -3070,8 +3240,7 @@ async function viewCards() {
           All <span class="muted">${cardsState.rows.length}</span></button>
         ${STAGE_ORDER.filter(([key]) => stages[key]).map(([key, label]) => `
           <button class="choice sm ${cardsState.stage === key ? 'active' : ''}" data-stage="${key}">
-            <span class="swatch" style="background:${STAGE_COLOR[key]}"></span>${label}
-            <span class="muted">${stages[key]}</span></button>`).join('')}
+            ${label} <span class="muted">${stages[key]}</span></button>`).join('')}
       </div>
       <label class="cards-sort">Order
         <select id="cards-sort">
@@ -3127,7 +3296,7 @@ function renderCardList() {
     // you have" is not, so it is said out loud.
     shape.push(`showing the ${cardsState.limit} most recent`);
   }
-  if (summary) summary.innerHTML = shape.join(' · ');
+  if (summary) summary.innerHTML = shape.join(', ');
 
   if (!rows.length) {
     host.innerHTML = `<div class="empty"><p>${cardsState.query
@@ -3184,12 +3353,22 @@ function visibleCards() {
   return rows;   // the API already returns them newest first
 }
 
+/* The weave examples come from the tutor's own instructions, where a gloss is
+   written (*like this*) so the model marks it in italics. That convention is
+   useful in the prompt and not in the dialog, so it is rendered rather than
+   shown as asterisks. */
+function weaveExampleHtml(text) {
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\(\*(.+?)\*\)/g, '(<em>$1</em>)');
+}
+
 function cardRowHtml(card) {
   const due = dueText(card.due_at, card.stage);
   const lemma = String(card.lemma || '').trim();
   const showsForm = lemma && fold(lemma) !== fold(card.term);
   const reviews = card.reps ? `${card.reps} review${card.reps === 1 ? '' : 's'}` : 'not reviewed';
-  const lapses = card.lapses ? ` · ${card.lapses} lapse${card.lapses === 1 ? '' : 's'}` : '';
+  const lapses = card.lapses ? `, ${card.lapses} lapse${card.lapses === 1 ? '' : 's'}` : '';
   return `<div class="deck-row">
     <div class="deck-word">
       <button class="btn-link es" data-hear="${escapeHtml(card.term)}"
@@ -3198,9 +3377,8 @@ function cardRowHtml(card) {
         ${escapeHtml(lemma)}</div>` : ''}
       ${card.context ? `<div class="deck-context">${escapeHtml(card.context)}</div>` : ''}
     </div>
-    <div class="deck-gloss">${escapeHtml(card.gloss || '—')}</div>
+    <div class="deck-gloss">${escapeHtml(card.gloss || 'no gloss')}</div>
     <div class="deck-when" title="${escapeHtml(card.due_at || '')}">
-      <span class="swatch" style="background:${STAGE_COLOR[card.stage] || 'var(--line)'}"></span>
       <span class="${due.late ? 'is-late' : ''}">${escapeHtml(due.text)}</span>
       <div class="small muted">${reviews}${lapses}</div>
     </div>
@@ -3208,7 +3386,7 @@ function cardRowHtml(card) {
       ? `<a class="quote-source" href="#/read/${encodeURIComponent(card.article_slug)}"
             title="${escapeHtml(card.article_title || '')}">${escapeHtml(card.article_title || card.article_slug)}</a>`
       : '<span class="muted small">no article</span>'}</div>
-    <button class="icon-btn" data-drop-card="${card.id}" title="Remove">✕</button>
+    <button class="icon-btn" data-drop-card="${card.id}" title="Remove" aria-label="Remove ${escapeHtml(card.term)} from the deck">✕</button>
   </div>`;
 }
 
@@ -3242,7 +3420,20 @@ async function viewReview() {
       <a class="btn ghost sm" href="#/cards" title="Every saved word, not only what is due">All saved words</a>
     </div>
     <div id="review-stage"></div>
-  </div>`;
+  </div>
+  <section class="page-adjunct review-adjunct">
+    <div class="adjunct-lead">
+      <h2>How a card moves</h2>
+      <p>An answer you recall easily moves the card to the next interval. A hard one
+      brings it back sooner, so the schedule follows what you actually remember.</p>
+    </div>
+    <div class="stage-ladder">
+      <div class="stage-step"><span class="name">New</span><span class="when">not yet reviewed</span></div>
+      <div class="stage-step"><span class="name">Learning</span><span class="when">back within a day</span></div>
+      <div class="stage-step"><span class="name">Young</span><span class="when">under three weeks</span></div>
+      <div class="stage-step"><span class="name">Mature</span><span class="when">three weeks or more</span></div>
+    </div>
+  </section>`;
   $$('[data-mode]', view).forEach(button => button.addEventListener('click', () => {
     reviewMode = button.dataset.mode;
     store.set('reviewMode', reviewMode);
@@ -3336,12 +3527,14 @@ function renderCard() {
       <div id="card-answer"></div>
     </div>
     <div id="card-grades"></div>
-    <p class="small muted" style="text-align:center;margin-top:14px">
-      <span class="kbd">space</span> reveal · <span class="kbd">1</span>–<span class="kbd">4</span> grade ·
-      <span class="kbd">S</span> hear it</p>`;
+    <p class="shortcut-line small muted">
+      <span><span class="kbd">space</span> reveal</span>
+      <span><span class="kbd">1</span> to <span class="kbd">4</span> grade</span>
+      <span><span class="kbd">S</span> hear it</span>
+    </p>`;
 
   if (blank) {
-    $('#card-answer').innerHTML = '<div class="muted small" style="margin-top:16px">— write it, then check —</div>';
+    $('#card-answer').innerHTML = '<div class="muted small review-hint">Write it, then check your answer.</div>';
     const input = $('#cloze-answer');
     input.focus();
     const submit = () => checkCloze(card);
@@ -3350,7 +3543,7 @@ function renderCard() {
       if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); submit(); }
     });
   } else {
-    $('#card-answer').innerHTML = '<div class="muted small" style="margin-top:20px">— recall the meaning, then reveal —</div>';
+    $('#card-answer').innerHTML = '<div class="muted small review-hint">Recall the meaning, then reveal it.</div>';
   }
 }
 
@@ -3402,7 +3595,7 @@ async function checkCloze(card) {
   $('#card-answer').innerHTML = `<div class="answer">
     <div class="gloss">${escapeHtml(card.term)}</div>
     ${dictionaryForm(card)}
-    <div class="note">${escapeHtml(card.gloss || '')}${card.note ? ` — ${escapeHtml(card.note)}` : ''}</div>
+    <div class="note">${escapeHtml(card.gloss || '')}${card.note ? ` (${escapeHtml(card.note)})` : ''}</div>
     ${result ? `<div class="meters" style="max-width:340px;margin:14px auto 0">
       ${Object.entries(checks).map(([key, value]) => `
         <div class="meter"><span>${key === 'fits' ? 'fits the blank' : 'exact word'}</span>
@@ -3410,7 +3603,7 @@ async function checkCloze(card) {
           background:${value >= .6 ? 'var(--good)' : value >= .35 ? 'var(--warn)' : 'var(--bad)'}"></i></span>
         <span class="val">${Math.round(value * 100)}%</span></div>`).join('')}
     </div>` : ''}
-    ${correct === false ? '<div class="small" style="margin-top:8px;color:var(--bad)">not quite — but the meaning may still fit, so judge yourself</div>' : ''}
+    ${correct === false ? '<div class="small" style="margin-top:8px;color:var(--bad)">not quite, but the meaning may still fit, so judge yourself</div>' : ''}
   </div>`;
   reviewRevealed = true;
   renderGrades(card);
@@ -3442,7 +3635,7 @@ function revealCard() {
   reviewRevealed = true;
   const card = reviewQueue[reviewIndex];
   $('#card-answer').innerHTML = `<div class="answer">
-    <div class="gloss">${escapeHtml(card.gloss || '—')}</div>
+    <div class="gloss">${escapeHtml(card.gloss || 'no gloss')}</div>
     ${dictionaryForm(card)}
     ${card.note ? `<div class="note">${escapeHtml(card.note)}</div>` : ''}
   </div>`;
@@ -3508,7 +3701,7 @@ async function renderReadingAnalytics(host) {
 
         <h4 class="sub-head">How much of it was new</h4>
         <p class="panel-sub">A word met for the first time, versus one you have met before,
-          versus one you keep meeting — which is what the reading is actually drilling.</p>
+          versus one you keep meeting, which is what the reading is actually drilling.</p>
         <div class="stack">
           ${[['new', 'var(--stage-1)'], ['familiar', 'var(--stage-2)'], ['repeated', 'var(--stage-4)']]
             .map(([key, colour]) => split[key]
@@ -3520,7 +3713,7 @@ async function renderReadingAnalytics(host) {
              ['repeated', 'Keep meeting', 'var(--stage-4)']]
             .map(([key, label, colour]) => `<span class="item">
               <span class="swatch" style="background:${colour}"></span>${label}
-              <span class="n">${split[key].toLocaleString()} · ${share(split.shares[key])}</span></span>`).join('')}
+              <span class="n">${split[key].toLocaleString()}, ${share(split.shares[key])}</span></span>`).join('')}
         </div>
 
         <h4 class="sub-head">Words read per day</h4>
@@ -3530,7 +3723,7 @@ async function renderReadingAnalytics(host) {
 
         <h4 class="sub-head">Depending on the English</h4>
         <p class="panel-sub">Every time you reached for help, per thousand Spanish words read.
-          A rate rather than a score — 40 lookups is a lot in 800 words and nothing in 12,000.</p>
+          A rate rather than a score. 40 lookups is a lot in 800 words and nothing in 12,000.</p>
         <div class="tiles tight-tiles">
           ${[
             ['Lookups', scaffold.lookups, scaffold.lookups_per_1000],
@@ -3567,8 +3760,9 @@ async function renderReadingAnalytics(host) {
       ` : `
         <div class="empty" style="padding:28px">
           <h3>Nothing counted yet</h3>
-          <p>Open an article and read a little. Words are credited as you scroll —
-            the reader already reports its position, so nothing extra is asked of it.</p>
+          <p>Open an article and read a little. Words are credited as you scroll.
+            The reader already reports its position, so nothing extra is asked of it.</p>
+          <p><a class="btn primary sm" href="#/library">Read something</a></p>
         </div>`}
     </div>`;
 
@@ -3585,8 +3779,8 @@ async function renderReadingAnalytics(host) {
                 gloss: button.dataset.gloss || null },
       });
       button.disabled = true;
-      button.innerHTML = `✓ ${escapeHtml(button.dataset.encounter)}`;
-      toast(`Saved · ${result.total} words`);
+      button.innerHTML = `${escapeHtml(button.dataset.encounter)} saved`;
+      toast(`Saved. Your deck now holds ${result.total} words.`);
       refreshDuePill();
     } catch (err) { toast(err.message, 'err'); }
   }));
@@ -3695,13 +3889,13 @@ async function renderCorpusMap(host) {
      surface (worst adjacent CVD ΔE 9.2, normal-vision 27.6). The palette
      validator flags two of them as below 3:1 on paper, which is why every node
      carries a visible label and there is a legend. */
-  const clusterColour = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100'];
+  const clusterColour = ['var(--accent)', 'var(--es-ink)', 'var(--warn)', 'var(--bad)'];
   const labelled = placeLabels(nodes, radius, width, height);
   const clusterOf = new Map(nodes.map(node => [node.slug, node.cluster]));
 
   host.innerHTML = `<div class="panel">
     <h3>Passage map</h3>
-    <p class="panel-sub">Two passages are joined when they share vocabulary — rare words
+    <p class="panel-sub">Two passages are joined when they share vocabulary. Rare words
       count for more than common ones, so the links are real subjects rather than
       articles that both happen to say "ejemplo". Node size is length; colour is the
       group the layout found, and each group is named from the words its members'
@@ -3749,7 +3943,7 @@ async function renderCorpusMap(host) {
         <button data-map-zoom="reset" title="Fit the whole map">Fit</button>
       </div>
     </div>
-    <p class="small muted map-hint">Drag to pan · scroll to zoom · click a passage to read it ·
+    <p class="small muted map-hint">Drag to pan. Scroll to zoom. Click a passage to read it.
       click a group to see only it</p>
     <div class="legend legend-groups">
       ${data.clusters.map(cluster => `<button class="item" data-cluster="${cluster.id}"
@@ -3762,8 +3956,8 @@ async function renderCorpusMap(host) {
       <span class="item"><span class="swatch ring-swatch"></span>ring = how much you already know</span>
     </div>
     ${labelled < nodes.length ? `<p class="small muted" style="margin-top:8px">
-      ${nodes.length - labelled} of ${nodes.length} labels are hidden to keep the map legible —
-      hover any node for its title.</p>` : ''}
+      ${nodes.length - labelled} of ${nodes.length} labels are hidden to keep the map legible.
+      Hover any node for its title.</p>` : ''}
 
     ${data.within_reach.length ? `
       <h4 class="sub-head">Closest to being readable</h4>
@@ -3838,7 +4032,7 @@ async function renderCorpusMap(host) {
    from are in the titles the reader can see, so the label can be checked rather
    than believed. */
 function clusterLabel(cluster) {
-  const topic = (cluster.topic || []).join(' · ');
+  const topic = (cluster.topic || []).join(', ');
   if (topic) return topic;
   return cluster.size === 1 ? 'stands alone' : 'no shared subject';
 }
@@ -4030,7 +4224,7 @@ async function viewStats() {
 
     <div class="tiles">
       <div class="tile"><div class="k">Streak</div><div class="v">${stats.streak.current}</div>
-        <div class="sub">day${stats.streak.current === 1 ? '' : 's'} · best ${stats.streak.longest}</div></div>
+        <div class="sub">day${stats.streak.current === 1 ? '' : 's'}. Best ${stats.streak.longest}.</div></div>
       <div class="tile"><div class="k">Words saved</div><div class="v">${stats.words}</div>
         <div class="sub">${stats.stages.mature} mature</div></div>
       <div class="tile"><div class="k">Due now</div><div class="v">${stats.due}</div>
@@ -4043,7 +4237,7 @@ async function viewStats() {
 
     <div class="panel">
       <h3>Reviews, last 30 days</h3>
-      <p class="panel-sub">${totalReviews} review${totalReviews === 1 ? '' : 's'} in this window · peak ${peak} in a day</p>
+      <p class="panel-sub">${totalReviews} review${totalReviews === 1 ? '' : 's'} in this window, with a peak of ${peak} in a day.</p>
       <div class="chart" id="reviews-chart">
         ${activity.map(d => `<div class="col ${d.reviews ? '' : 'zero'}" title="${d.day}: ${d.reviews} review${d.reviews === 1 ? '' : 's'}">
           <i style="height:${d.reviews ? Math.max(4, Math.round(d.reviews / peak * 100)) : 2}%"></i></div>`).join('')}
@@ -4054,7 +4248,7 @@ async function viewStats() {
 
     <div class="panel">
       <h3>How well the vocabulary has stuck</h3>
-      <p class="panel-sub">Spaced repetition stages — a word graduates to <em>mature</em> after three weeks of intervals</p>
+      <p class="panel-sub">Spaced repetition stages. A word graduates to <em>mature</em> after three weeks of intervals.</p>
       <div class="stack">
         ${stageOrder.map(([key, , color]) => stats.stages[key]
           ? `<span style="background:${color};width:${(stats.stages[key] / stageTotal * 100).toFixed(1)}%"
@@ -4069,9 +4263,8 @@ async function viewStats() {
 
     <div class="panel">
       <h3>Words</h3>
-      <p class="panel-sub">${words.words.length} saved${stats.reviews_total ? ` · ${stats.reviews_total} reviews all time` : ''}
-        · <a href="#/cards" style="color:var(--accent-ink)">see every card</a>
-        · <a href="/api/export.csv" style="color:var(--accent-ink)">export for Anki</a></p>
+      <p class="panel-sub">${words.words.length} saved${stats.reviews_total ? `, ${stats.reviews_total} reviews all time` : ''}.
+        <a href="#/cards">See every card</a>. <a href="/api/export.csv">Export for Anki</a>.</p>
       ${words.words.length ? `<p class="small muted">Most recent:
         ${words.words.slice(0, 6).map(w => `<span class="chip es">${escapeHtml(w.term)}</span>`).join(' ')}</p>`
         : '<p class="muted small">Nothing saved yet. Click any Spanish word while reading.</p>'}
@@ -4080,8 +4273,8 @@ async function viewStats() {
     <div class="panel danger-zone">
       <h3>Start over</h3>
       <p class="panel-sub">Clears the deck, the schedule, your reading positions, the sentences you kept,
-        your writing, and all of the history measured from them. <strong>Your lessons stay</strong> —
-        they are files, and this does not touch files.</p>
+        your writing, and all of the history measured from them. <strong>Your lessons stay.</strong>
+        They are files, and this does not touch files.</p>
       <div class="row">
         <button class="btn ghost sm danger-hover" id="btn-reset">Reset all records and progress</button>
         <span class="small muted">A copy of the database is saved to <code>data/backups</code> first.</span>
@@ -4105,7 +4298,7 @@ function openReset(stats) {
   openModal('Start over?', `
     <p style="margin-top:0">This clears everything the app has measured about you:</p>
     <ul class="reset-list">
-      <li>your saved words and their review schedule — <strong>${stats.words}</strong> cards</li>
+      <li>your saved words and their review schedule: <strong>${stats.words}</strong> cards</li>
       <li>every review, every word lookup, and the reading history behind your streak</li>
       <li>where you are in each article, and which ones you finished</li>
       <li>the sentences you kept, your writing, your weekly goal</li>
@@ -4113,7 +4306,7 @@ function openReset(stats) {
     <p>It keeps <strong>your lessons</strong>: the corpus, and everything in your library folder.
       Files are not touched by this.</p>
     <p class="small muted">A copy of the database is written to <code>data/backups</code> first, so this
-      is recoverable — but only by hand, from that file.</p>
+      is recoverable, but only by hand, from that file.</p>
     <div class="row">
       <button class="btn danger" id="reset-go">Clear all records and progress</button>
       <button class="btn ghost" id="reset-cancel">Cancel</button>
@@ -4126,7 +4319,7 @@ function openReset(stats) {
     try {
       const result = await api('/api/reset', { method: 'POST' });
       closeModal();
-      toast(`Cleared ${result.cleared.words} words and ${result.cleared.reviews} reviews — `
+      toast(`Cleared ${result.cleared.words} words and ${result.cleared.reviews} reviews. `
         + `lessons untouched, backup in data/backups`);
       refreshDuePill();
       viewStats();
@@ -4152,7 +4345,7 @@ function renderRecommendations(host, result) {
         ${topics.map(t => `<span class="chip" title="${escapeHtml(t.why)}">${escapeHtml(t.query)}</span>`).join(' ')}</div>`
     : '';
   const basisLine = `<div class="small muted" style="margin-bottom:12px">${escapeHtml(basis.note || '')}
-    ${basis.words ? ` · matching against ${basis.words} saved word${basis.words === 1 ? '' : 's'}` : ''}</div>`;
+    ${basis.words ? `, matching against ${basis.words} saved word${basis.words === 1 ? '' : 's'}` : ''}</div>`;
 
   if (!candidates.length) {
     host.innerHTML = `${topicList}${basisLine}
@@ -4164,7 +4357,7 @@ function renderRecommendations(host, result) {
   host.innerHTML = `${topicList}${basisLine}
     ${basis.words ? `<div class="verdict correct" style="margin-bottom:12px">
       <div class="headline">Best match: ${Math.round(best.score * 100)}% of your words are likely to appear</div>
-      <div class="small">${best.hits.slice(0, 14).map(escapeHtml).join(' · ')}</div>
+      <div class="small">${best.hits.slice(0, 14).map(escapeHtml).join(', ')}</div>
     </div>` : ''}
     <div class="results">
       ${candidates.map(c => `
@@ -4172,12 +4365,12 @@ function renderRecommendations(host, result) {
           <div class="t">${escapeHtml(c.title)}</div>
           <div class="s">${escapeHtml((c.snippet || '').slice(0, 210))}</div>
           <div class="u">
-            ${c.words ? `${c.words} words · ` : ''}${escapeHtml(c.site)}
-            ${c.hits && c.hits.length ? ` · <span style="color:var(--accent-ink)">reuses ${c.hits.length}: ${escapeHtml(c.hits.slice(0, 6).join(', '))}</span>` : ''}
+            ${c.words ? `${c.words} words, ` : ''}${escapeHtml(c.site)}
+            ${c.hits && c.hits.length ? `, <span style="color:var(--accent-ink)">reuses ${c.hits.length}: ${escapeHtml(c.hits.slice(0, 6).join(', '))}</span>` : ''}
           </div>
         </div>`).join('')}
     </div>
-    <p class="small muted" style="margin-top:12px">Pick one to weave into Spanish — it takes a few minutes.</p>`;
+    <p class="small muted" style="margin-top:12px">Pick one to weave into Spanish. It takes a few minutes.</p>`;
 
   $$('.result', host).forEach(el => el.addEventListener('click', () => {
     closeModal();
@@ -4256,7 +4449,7 @@ function weaveControlsHtml(options) {
           </button>`).join('')}
       </div>
       <p class="small muted" id="weave-blurb" style="margin:8px 0 6px">${escapeHtml(chosen.blurb)}</p>
-      <pre class="weave-example" id="weave-example">${escapeHtml(chosen.example)}</pre>
+      <pre class="weave-example" id="weave-example">${weaveExampleHtml(chosen.example)}</pre>
     </div>`;
 }
 
@@ -4308,7 +4501,7 @@ function wireImportControls(onChange, extraBody = {}) {
     const blurb = $('#weave-blurb');
     if (blurb && chosen) blurb.textContent = chosen.blurb;
     const example = $('#weave-example');
-    if (example && chosen) example.textContent = chosen.example;
+    if (example && chosen) example.innerHTML = weaveExampleHtml(chosen.example);
     refresh();
   }));
 
@@ -4355,10 +4548,10 @@ function importSourceHtml(prefill, titleHint) {
     <div class="field" id="import-paste-fields" ${link ? 'hidden' : ''}>
       <label for="import-text">Article text</label>
       <textarea id="import-text" rows="9"
-                placeholder="Select the article in your browser, copy it, and paste it here — headline and all."></textarea>
+                placeholder="Select the article in your browser, copy it, and paste it here, headline and all."></textarea>
       <p class="small muted" style="margin:6px 0 0">Leave the blank lines between paragraphs: they are what
-      tells the app where one paragraph ends. For a page the app cannot reach at all — a paywall, a reader
-      that needs JavaScript — this is the way in.</p>
+      tells the app where one paragraph ends. For a page the app cannot reach at all (a paywall, a reader
+      that needs JavaScript), this is the way in.</p>
     </div>
     <div class="field">
       <label for="import-title">Title <span class="muted" id="import-title-note"></span></label>
@@ -4366,7 +4559,7 @@ function importSourceHtml(prefill, titleHint) {
     </div>
     <div class="field" id="import-source-field" ${link ? 'hidden' : ''}>
       <label for="import-source-url">Original URL (optional)</label>
-      <input type="url" id="import-source-url" placeholder="https://… — kept with the lesson for reference">
+      <input type="url" id="import-source-url" placeholder="https://…, kept with the lesson for reference">
     </div>`;
 }
 
@@ -4381,18 +4574,18 @@ function applyImportMode(mode) {
   const lede = $('#import-lede');
   if (lede) {
     lede.textContent = link
-      ? 'The page is fetched, woven into Spanish, and given post-reading notes — then it joins your '
+      ? 'The page is fetched, woven into Spanish, and given post-reading notes. Then it joins your '
         + 'library like any other text. That takes a few minutes and runs in the background, so you '
         + 'can close this and keep reading.'
-      : 'What you paste is woven into Spanish and given post-reading notes, with no fetching at all — '
-        + 'so this works for a page the app cannot reach. It takes a few minutes and runs in the '
+      : 'What you paste is woven into Spanish and given post-reading notes, with no fetching at all. '
+        + 'So this works for a page the app cannot reach. It takes a few minutes and runs in the '
         + 'background, so you can close this and keep reading.';
   }
   const note = $('#import-title-note');
   if (note) {
     note.textContent = link
-      ? '(optional — only if the page title comes out wrong)'
-      : '(optional — the headline, if it is not the first line)';
+      ? '(optional, only if the page title comes out wrong)'
+      : '(optional, the headline if it is not the first line)';
   }
   const focus = $(link ? '#import-url' : '#import-text');
   if (focus && !focus.value) focus.focus();
@@ -4449,7 +4642,7 @@ async function openImport(prefill = '', titleHint = '') {
       $('#import-job').innerHTML = `<div data-job-detail="${response.job_id}" style="margin-top:16px"></div>`;
       const job = await api(`/api/jobs/${response.job_id}`);
       updateJob(job);
-      button.textContent = 'Importing — you can close this';
+      button.textContent = 'Importing. You can close this';
       button.classList.remove('primary');
       button.disabled = true;
     } catch (err) {
@@ -4491,8 +4684,8 @@ async function openSettings() {
 
   openModal('Settings', `
     <p class="small muted" style="margin-top:0">The model is what turns an article into a lesson: weaving,
-    glosses, quizzes and exercises all go through it. Everything else — reading, saving words, review —
-    works without one.${llm.from === 'env' ? ' These are currently coming from your <code>.env</code>;'
+    glosses, quizzes and exercises all go through it. Everything else works without one: reading,
+    saving words, review.${llm.from === 'env' ? ' These are currently coming from your <code>.env</code>;'
       + ' anything you set here takes over from it.' : ''}</p>
     <div class="field">
       <label for="set-base-url">API base URL</label>
@@ -4507,18 +4700,18 @@ async function openSettings() {
     <div class="field">
       <label for="set-key">API key
         <span class="muted">${llm.key_set
-          ? `— ${escapeHtml(llm.key_hint || 'set')} is in use${llm.from ? ` (from your ${llm.from === 'app' ? 'settings' : '.env'})` : ''}`
-          : '— none set'}</span></label>
+          ? `In use: <code>${escapeHtml(llm.key_hint || 'set')}</code>${llm.from ? ` from your ${llm.from === 'app' ? 'settings' : '.env'}` : ''}.`
+          : 'None set.'}</span></label>
       <input type="password" id="set-key" autocapitalize="off" autocorrect="off" spellcheck="false"
              placeholder="${llm.key_set ? 'leave blank to keep the one you have' : 'paste your key'}">
       <p class="small muted" style="margin:6px 0 0">Stored in <code>data/settings.json</code> on this machine,
-      next to your library — never sent anywhere except your own endpoint, and never back to this page.</p>
+      next to your library. It is sent only to your own endpoint, and never back to this page.</p>
     </div>
     <div class="settings-state" id="settings-state">
       ${llm.ready
-        ? `<span class="chip ok">model ready</span> ${escapeHtml(llm.model || '')}`
-        : '<span class="chip warn">no model configured</span> searching and reading still work'}
-      ${judge.ready ? '<span class="chip">graded by Jev</span>' : ''}
+        ? `<span class="chip ok">Model ready</span> ${escapeHtml(llm.model || '')}`
+        : '<span class="chip warn">No model configured</span> Searching and reading still work.'}
+      ${judge.ready ? '<span class="chip">Graded by Jev</span>' : ''}
     </div>
     <div class="row" style="margin-top:14px">
       <button class="btn primary" id="settings-save">Save</button>
@@ -4526,11 +4719,28 @@ async function openSettings() {
       <span class="small muted" id="settings-note"></span>
     </div>
     <p class="small muted" style="margin-bottom:0">Advanced: the TypeSafe key for graded exercises is read
-    from <code>${escapeHtml(current.env_file || '.env')}</code>, and left alone here${judge.ready ? '' : ' (it is not set)'}.</p>
+    from <code>${escapeHtml(current.env_file || '.env')}</code> and left alone here${judge.ready ? '' : '. It is not set.'}</p>
+    <div class="settings-pref">
+      <div class="settings-pref-head">
+        <h3>Reading background</h3>
+        <span class="small muted" id="set-bg-note">${prefs.pageColor
+          ? 'A custom colour is in use.' : `Following the ${prefs.theme} theme.`}</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="settings-bg" for="set-bg">
+          <input type="color" id="set-bg"
+                 value="${escapeHtml(prefs.pageColor || themePageHex(prefs.theme))}">
+          <span>Custom colour</span>
+        </label>
+        <button class="btn ghost sm" id="set-bg-reset" ${prefs.pageColor ? '' : 'hidden'}>Back to the theme colour</button>
+      </div>
+      <p class="small muted" style="margin:6px 0 0">The colour of the page behind the text. Ink switches
+      between dark and light so the page stays readable.</p>
+    </div>
     <div class="row settings-quit" style="margin-top:16px; padding-top:14px">
       <button class="btn ghost sm" id="settings-quit"
               title="Stop the app on this machine. Everything is already saved; start it again the same way you started it.">Quit the app</button>
-      <span class="small muted">Nothing is lost — every save is already on disk.</span>
+      <span class="small muted">Nothing is lost. Every save is already on disk.</span>
     </div>`);
 
   const send = async (body, button) => {
@@ -4541,7 +4751,7 @@ async function openSettings() {
       const fresh = await api('/api/settings', { method: 'POST', body });
       closeModal();
       toast(fresh.llm.ready
-        ? `Model ready — ${fresh.llm.model}`
+        ? `Model ready: ${fresh.llm.model}.`
         : 'Saved, but the model still needs a base URL, a key and a model name');
       // The import dialog and Discover read the app's status, so it is refreshed
       // rather than assumed -- a key that just started working should stop them
@@ -4570,6 +4780,23 @@ async function openSettings() {
   $('#settings-clear').addEventListener('click', () =>
     send({ llm_api_key: '', llm_base_url: '', llm_model: '' }, $('#settings-clear')));
 
+  const bg = $('#set-bg');
+  const bgNote = $('#set-bg-note');
+  const bgReset = $('#set-bg-reset');
+  const paintBgNote = () => {
+    if (bgReset) bgReset.hidden = !prefs.pageColor;
+    if (!bgNote) return;
+    bgNote.textContent = prefs.pageColor
+      ? 'A custom colour is in use.'
+      : `Following the ${prefs.theme} theme.`;
+  };
+  if (bg) bg.addEventListener('input', () => { savePref('pageColor', bg.value); paintBgNote(); });
+  if (bgReset) bgReset.addEventListener('click', () => {
+    savePref('pageColor', '');
+    if (bg) bg.value = themePageHex(prefs.theme);
+    paintBgNote();
+  });
+
   /* Stopping the app from the app.
      Two clicks, the pattern used everywhere else something cannot be undone by
      pressing the button again -- and here there is nothing to press, because the
@@ -4595,7 +4822,7 @@ async function openSettings() {
     try {
       await api('/api/quit', { method: 'POST' });
       closeModal();
-      toast('Closed — everything is saved. You can close this tab.');
+      toast('Closed. Everything is saved. You can close this tab.');
     } catch (err) {
       button.disabled = false;
       button.dataset.armed = '0';
@@ -4679,8 +4906,8 @@ function shareReport(report) {
     return `<div class="panel"><h3>That is not a diglot lesson</h3>
       <p class="panel-sub">${escapeHtml(report.error || 'It could not be read.')}</p>
       <p class="small muted">A lesson is Markdown with an "Article Identification &amp; Preview"
-      front matter block, the woven text, and a post-reading section. Anything else — a plain
-      article, a web page, a screenshot — needs importing by link instead.</p></div>`;
+      front matter block, the woven text, and a post-reading section. A plain article, a web page or a
+      screenshot needs importing by link instead.</p></div>`;
   }
 
   const stats = report.stats || {};
@@ -4700,7 +4927,7 @@ function shareReport(report) {
   if (report.intact === false) {
     warnings.push(`<div class="share-warning">The text has changed since this file was
       exported, so the digest no longer matches. That happens when someone fixes a typo by
-      hand — it is not a reason to refuse it, just something to know.</div>`);
+      hand. It is not a reason to refuse it, just something to know.</div>`);
   }
   if (report.intact === null) {
     warnings.push(`<div class="share-warning subtle">No digest in this file, so there is no
@@ -4737,7 +4964,7 @@ function shareReport(report) {
       ${report.anchor_count ? `<span>${report.anchor_count} vocabulary notes</span>` : ''}
       ${report.grammar_count ? `<span>${report.grammar_count} grammar notes</span>` : ''}
     </div>
-    ${report.author ? `<p class="small muted">By ${escapeHtml(report.author)}${report.url ? ` · <a href="${escapeHtml(report.url)}" target="_blank" rel="noopener">original</a>` : ''}</p>` : ''}
+    ${report.author ? `<p class="small muted">By ${escapeHtml(report.author)}${report.url ? `, <a href="${escapeHtml(report.url)}" target="_blank" rel="noopener">original</a>` : ''}</p>` : ''}
     ${report.preview ? `<p class="share-preview">${escapeHtml(report.preview)}</p>` : ''}
     ${(report.teaches || []).length ? `<div class="share-teaches"><div class="small muted">It teaches</div>
       <div class="row">${report.teaches.slice(0, 14).map(t => `<span class="chip">${escapeHtml(t.es)}${t.en ? ` <span class="muted">${escapeHtml(t.en)}</span>` : ''}</span>`).join('')}</div></div>` : ''}
@@ -4862,7 +5089,7 @@ function openDiscover() {
       $('#recommend-job').innerHTML = `<div data-job-detail="${response.job_id}" style="margin-top:12px"></div>`;
       const job = await api(`/api/jobs/${response.job_id}`);
       updateJob(job);
-      button.textContent = 'Looking — you can close this';
+      button.textContent = 'Looking. You can close this';
     } catch (err) {
       button.disabled = false;
       button.textContent = 'Find something for my words';
@@ -4882,7 +5109,7 @@ function discoverMoreHtml(more, query) {
   if (more) {
     return `<div class="row discover-more">
       <button class="btn ghost sm" id="discover-more"
-              title="Ask for the results beyond these — the same search has more to give">Show different results</button>
+              title="Ask for the results beyond these. The same search has more to give">Show different results</button>
     </div>`;
   }
   // "right now" is doing real work: the feeds move and a search engine that
@@ -4904,7 +5131,7 @@ function discoverResult(row) {
        data-title="${escapeHtml(row.title)}" data-have="${row.already_have ? '1' : ''}">
     <div class="t">${escapeHtml(row.title)}</div>
     <div class="s">${escapeHtml(row.snippet || '')}</div>
-    <div class="u">${escapeHtml(row.source)} · ${escapeHtml(row.site)} ${have}${register}</div>
+    <div class="u">${escapeHtml(row.source)}, ${escapeHtml(row.site)} ${have}${register}</div>
   </div>`;
 }
 
@@ -5058,7 +5285,11 @@ window.addEventListener('beforeunload', () => {
 });
 
 $$('.theme-switch button').forEach(button =>
-  button.addEventListener('click', () => savePref('theme', button.dataset.themeSet)));
+  button.addEventListener('click', () => {
+    // Choosing a named theme is also how you leave a custom page colour.
+    if (prefs.pageColor) savePref('pageColor', '');
+    savePref('theme', button.dataset.themeSet);
+  }));
 
 /* ------------------------------------------------------------- startup ---- */
 

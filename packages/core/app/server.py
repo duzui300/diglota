@@ -86,7 +86,7 @@ def _job_title(url: str, title_hint: str | None) -> str:
     site = parsed.netloc.removeprefix("www.")
     slug = urllib.parse.unquote(parsed.path.rstrip("/").rsplit("/", 1)[-1])
     name = re.sub(r"[_\-]+", " ", slug).strip()
-    return f"{name.title()} · {site}" if name else site or url
+    return f"{name.title()}, {site}" if name else site or url
 
 
 def _paste_title(text: str) -> str:
@@ -100,7 +100,7 @@ def _paste_title(text: str) -> str:
     first = re.sub(r"^#{1,6}\s*", "", first).strip()
     if len(first) > 56:
         first = first[:55].rstrip() + "…"
-    return f"{first} · pasted text" if first else "Pasted text"
+    return f"{first}, pasted text" if first else "Pasted text"
 
 
 class _WeaveCache:
@@ -383,9 +383,9 @@ class App:
         # The title carries the settings, because two imports of the same
         # article at different levels are different lessons and should not look
         # identical in the Activity panel.
-        settings_note = f"{chosen.code} · {round(amount * 100)}% Spanish"
+        settings_note = f"{chosen.code}, {round(amount * 100)}% Spanish"
         label = title_hint or (_paste_title(text) if (text or "").strip() else _job_title(url or "", None))
-        return self.jobs.submit(kind="import", title=f"{label} — {settings_note}", work=work)
+        return self.jobs.submit(kind="import", title=f"{label}. {settings_note}", work=work)
 
     def start_lesson_from_writing(self, text: str, title: str,
                                   level: str | None = None, ratio: float | None = None,
@@ -409,8 +409,8 @@ class App:
             return result
 
         label = (title or writing.title_for(text))[:70]
-        settings_note = f"{chosen.code} · {round(amount * 100)}% Spanish"
-        return self.jobs.submit(kind="writing", title=f"{label} — {settings_note}", work=work)
+        settings_note = f"{chosen.code}, {round(amount * 100)}% Spanish"
+        return self.jobs.submit(kind="writing", title=f"{label}. {settings_note}", work=work)
 
     def start_recommend(self) -> Job:
         if self.tutor is None:
@@ -714,8 +714,8 @@ def delete_article(slug: str) -> dict[str, Any]:
         raise HTTPException(
             409,
             f"“{entry.article.title}” is one of your own files, in "
-            f"{application.settings.corpus_dir} — the app reads that folder and does not "
-            "delete from it. Remove the file there and it will disappear from the library",
+            f"{application.settings.corpus_dir}. The app reads that folder and does not "
+            "delete from it. Remove the file there and it will disappear from the library.",
         )
     if entry.path is None:
         raise HTTPException(409, "this lesson has no file to delete")

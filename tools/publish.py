@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Files that exist in the development repository and must not be published.
 EXCLUDE = {"LOG.md"}
+# Design studies and their screenshots are working material, not the product.
+EXCLUDE_PREFIXES = ("design/", "shots/")
 
 DEFAULT_TARGET = ROOT.parent / "diglota"
 DEFAULT_REMOTE = "https://github.com/<you>/diglota.git"
@@ -48,7 +50,8 @@ def tracked_files() -> list[str]:
     (their deck, their library, their keys) is ignored, so it cannot be exported
     by accident even if this script is wrong about something else."""
     out = git("ls-files").stdout.splitlines()
-    return [name for name in out if name not in EXCLUDE]
+    return [name for name in out
+            if name not in EXCLUDE and not name.startswith(EXCLUDE_PREFIXES)]
 
 
 def copy_one(source: Path, destination: Path) -> None:
@@ -106,7 +109,7 @@ def main() -> int:
 
     count = copy_out(target)
     print(f"exported {count} files to {target}")
-    print(f"  excluded: {', '.join(sorted(EXCLUDE))}, the ignored paths, and shots/")
+    print(f"  excluded: {', '.join(sorted(EXCLUDE))}, design/, shots/, and the ignored paths")
 
     git("add", "-A", cwd=target)
     staged = git("diff", "--cached", "--name-only", cwd=target).stdout.strip()

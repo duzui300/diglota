@@ -1,25 +1,38 @@
 # Diglota
 
 <p align="center">
+
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/platform-Web%20%7C%20Windows-lightgrey" alt="Platform: Web and Windows" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/AI-Optional%20%7C%20Local--First-black" alt="Optional AI" /></a>
+
 </p>
 
 Diglota is a reading-first app for learning Spanish through English by the diglot weave, in which Spanish phrases carrying short English glosses are set into English prose. It is built for independent learners at any level: the reading interface, morphological dictionary lookups, vocabulary coverage metrics and spaced repetition all run offline, with no account and no API key.
 
 As you read, click any Spanish word for an instant lemma, tense and usage entry; save words to meet them again in spaced repetition inside the exact sentences where you found them; and, if you want more, connect AI models — TypeSafe Jev for semantic grading, or any OpenAI-compatible chat model for tutoring and lesson synthesis.
 
-![The Diglota desktop app](assets/desktop.png)
+![](orca-paste-1792960512875-8dacf183-d558-47ae-8671-547ea3196d37.png)
+
+![](orca-paste-1792960487287-e4576908-8ca3-4c7e-8428-bd81a9d9e162.png)
 
 ---
+
+## What's New in 1.0.1
+
+- **Editorial redesign.** The library opens on the next lesson and a single shelf rail; the reader is a page with a working margin. Every room shares the same paper, hairlines and type instead of a grid of cards.
+- **A reading background you choose.** Settings now has a custom page colour. Ink, rules and accents follow the colour's tone; the named Paper, Sepia and Night themes remain.
+- **Your mark.** The masthead, splash, browser icon and Windows app icon now carry the open-book mark and wordmark.
+- **Quieter ends to Review, Quotes and Write,** with a stage ladder, a quotation note and a weave legend instead of empty space.
+
+Existing lessons, saved words and review history are untouched by the update.
 
 ## What's New in 1.0.0
 
 - **Native Windows window.** Diglota now runs as a dedicated desktop app through pywebview and Edge WebView2. The FastAPI engine runs in-process on an OS-assigned loopback port, so it cannot collide with a web copy, and the window remembers its geometry and the reader's state.
-- **One-file installer.** `Diglota-Setup-1.0.0.exe` installs directly beside itself. It needs no administrator rights, creates no hidden copy in `%LOCALAPPDATA%`, and keeps your lessons and reading history when you update — and, by default, when you uninstall.
+- **One-file installer.** The setup program installs directly beside itself. It needs no administrator rights, creates no hidden copy in `%LOCALAPPDATA%`, and keeps your lessons and reading history when you update — and, by default, when you uninstall.
 - **Monorepo architecture.** One engine now serves the web app, the command line and the desktop window: `packages/core`, `packages/ui`, `packages/web` and `packages/win`.
 - **580 automated tests.** Forty desktop and setup tests join the 540 engine tests; `python -m pytest -q` passes all 580.
 
@@ -33,13 +46,13 @@ Diglota offers two desktop approaches on Windows, plus a cross-platform web serv
 
 The simplest way to use Diglota on Windows 10 or 11. The desktop app needs the WebView2 runtime; Windows 11 includes it by default.
 
-1. Download or build `Diglota-Setup-1.0.0.exe`.
+1. Download or build `Diglota-Setup-1.0.1.exe`.
 2. Move the setup file to the folder where Diglota should live — for example, `D:\Apps\Diglota`.
 3. Run the installer. It installs **beside itself**, in that folder — no administrator permissions, and no scattered files in `%LOCALAPPDATA%`.
 4. The setup window shows the install path before copying anything, offers **Change…** to pick another folder, and counts the files as it goes.
 5. Setup creates a Start menu shortcut, an optional desktop shortcut, and an entry in Windows *Settings → Apps*.
 
-![The Diglota setup window](assets/installer.png)
+![](orca-paste-1792960473191-3af42e14-25e8-42ac-9075-13dadf164006.png)
 
 > **Updating and uninstalling.** To update, run the setup program again in the install folder; your database (`data/`) and lessons (`corpus/`) are left untouched. The uninstaller removes program files while keeping your library, settings and cards by default, unless you explicitly tick the box to erase them.
 
@@ -83,7 +96,7 @@ pythonw run.py --log data/app.log
 
 ---
 
-## Configuration & Local-First Storage
+## Configuration &amp; Local-First Storage
 
 Diglota is local-first by design:
 
@@ -112,16 +125,18 @@ DIGLOT_PROXY=http://127.0.0.1:7890        # HTTP/HTTPS proxy, if one is required
 
 ### Feature Availability Matrix
 
-| Feature | Without API Keys (Offline) | With LLM Configured | With TypeSafe / Jev |
-| :--- | :---: | :---: | :---: |
-| **Diglot Reader & Text Layout** | ✅ Full | ✅ Full | ✅ Full |
-| **Corpus Morphological Glosses** | ✅ Full (Instant pre-indexed) | ✅ Full | ✅ Full |
-| **Deep Explanations & Lemmatization** | ⚠️ Fallback to corpus gloss | ✅ Interactive AI tutor | ✅ Interactive AI tutor |
-| **Bilingual TTS Read-Aloud** | ✅ Web Speech API | ✅ Web Speech API | ✅ Web Speech API |
-| **SM-2 Spaced Repetition (Deck & Quotes)** | ✅ Full | ✅ Full | ✅ Full |
-| **Writing Workspace Metrics** | ✅ Spanish % & word counts | ✅ Real-time feedback & revisions | ✅ Real-time feedback & revisions |
-| **Semantic Exercise Grading** | ⚠️ String & cloze verification | ⚠️ Conversational LLM judge | ✅ Calibrated semantic confidence |
-| **Web Import & Lesson Weaver** | ❌ Requires LLM | ✅ Autonomous lesson synthesis | ✅ Autonomous lesson synthesis |
+
+| Feature                                        | Without API Keys (Offline)         | With LLM Configured                  | With TypeSafe / Jev                  |
+| :---------------------------------------------- | :----------------------------------: | :------------------------------------: | :------------------------------------: |
+| **Diglot Reader &amp; Text Layout**            | ✅ Full                             | ✅ Full                               | ✅ Full                               |
+| **Corpus Morphological Glosses**               | ✅ Full (Instant pre-indexed)       | ✅ Full                               | ✅ Full                               |
+| **Deep Explanations &amp; Lemmatization**      | ⚠️ Fallback to corpus gloss        | ✅ Interactive AI tutor               | ✅ Interactive AI tutor               |
+| **Bilingual TTS Read-Aloud**                   | ✅ Web Speech API                   | ✅ Web Speech API                     | ✅ Web Speech API                     |
+| **SM-2 Spaced Repetition (Deck &amp; Quotes)** | ✅ Full                             | ✅ Full                               | ✅ Full                               |
+| **Writing Workspace Metrics**                  | ✅ Spanish % &amp; word counts      | ✅ Real-time feedback &amp; revisions | ✅ Real-time feedback &amp; revisions |
+| **Semantic Exercise Grading**                  | ⚠️ String &amp; cloze verification | ⚠️ Conversational LLM judge          | ✅ Calibrated semantic confidence     |
+| **Web Import &amp; Lesson Weaver**             | ❌ Requires LLM                     | ✅ Autonomous lesson synthesis        | ✅ Autonomous lesson synthesis        |
+
 
 ---
 
@@ -139,9 +154,9 @@ DIGLOT_PROXY=http://127.0.0.1:7890        # HTTP/HTTPS proxy, if one is required
 - **Navigation without clutter.** The contents pane indexes genuine document sections while ignoring duplicate links, kicker lines and page furniture.
 - **Register tracking.** Identifies whether a text is news, essay, conversation, academic or fiction, and lets you update register tags in the article file.
 
-### 2. Vocabulary Coverage & Readiness
+### 2. Vocabulary Coverage &amp; Readiness
 
-![The library](assets/library.png)
+![](orca-paste-1792960457879-8ec583f2-3e25-481e-8cc9-0d959b4a7612.png)
 
 Before opening any lesson, the library shows what percentage of its Spanish vocabulary you already know from your personal deck. Coverage calculations stem conjugated verbs, account for diphthong stem changes, strip reflexive clitics and exclude Spanish function words, so the figure reflects what you would actually have to learn.
 
@@ -171,7 +186,7 @@ Practise producing Spanish in an active drafting environment:
 - **Revision options.** Ask for a revision that fixes grammar, sounds more native, enriches the phrasing, or keeps your original wording.
 - **Make a lesson.** Convert a draft into a full diglot lesson, with vocabulary tables and grammar notes, ready for your library.
 
-### 6. Reading Analytics & Passage Map
+### 6. Reading Analytics &amp; Passage Map
 
 ![Progress and analytics](assets/progress.png)
 
@@ -188,7 +203,7 @@ Translation drills test understanding rather than exact string matches. Diglota 
 2. **Chat LLM fallback.** Gives a qualitative evaluation and explanation when Jev is not configured.
 3. **Offline heuristic matching.** Checks the answer against the reference. An offline answer that differs from the reference is labelled **Unverified** rather than incorrect.
 
-### 8. Lesson Ingestion & Discovery
+### 8. Lesson Ingestion &amp; Discovery
 
 ![Discover engine](assets/discover.png)
 
@@ -293,32 +308,38 @@ When you import a shared file, the library verifies the body digest and shows th
 │       ├── build.py               # PyInstaller build script for the app and setup exes
 │       ├── make_icon.py           # Windows icon asset builder
 │       ├── *.spec                 # PyInstaller specification files
-│       └── tests/                 # 40 desktop and setup tests
+│       └── tests/                 # 41 desktop and setup tests
 ├── corpus/                        # Curated Markdown lessons (one sample ships)
 ├── data/                          # User database, settings and library (not in git)
-├── assets/                        # Screenshots and documentation images
+├── assets/                        # Screenshots, documentation images and the logo sources
 ├── tools/                         # QA tooling (segment_qa, ui_test, publish, etc.)
 ├── run.py                         # Root entry point delegating to packages/web/run.py
 └── Open Diglot.vbs                # Windows browser launcher (runs the server via pythonw)
 ```
 
+The brand source files are in `assets/`. The UI serves its own copies from
+`packages/ui/static/brand/`, including lifted-ink versions for night paper; the
+desktop icon is built from `packages/win/assets/diglota-mark.png`. Newsreader and
+Hanken Grotesk are self-hosted under the SIL Open Font License, with their
+licences beside the font files.
+
 ---
 
-## Testing & Quality Assurance
+## Testing &amp; Quality Assurance
 
-The suite contains 580 automated tests covering the language engine, desktop packaging and setup safety:
+The suite contains 581 automated tests covering the language engine, desktop packaging and setup safety:
 
 ```bash
 # Install development and testing tooling
 pip install -r requirements-dev.txt
 
-# Run the full suite (580 tests)
+# Run the full suite (581 tests)
 python -m pytest -q
 
 # Run engine tests only (540 tests)
 python -m pytest packages/core/tests/ -q
 
-# Run desktop and setup tests only (40 tests)
+# Run desktop and setup tests only (41 tests)
 python -m pytest packages/win/tests/ -q
 
 # Run browser checks (drives local Chrome via Playwright)

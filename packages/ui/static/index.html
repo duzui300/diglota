@@ -3,17 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Diglota — read Spanish into English</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="/static/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📖</text></svg>">
+<meta name="description" content="A local-first Spanish reading app: diglot lessons, word lookup, review and writing, with your library on your own machine.">
+<title>Diglota: read Spanish into English</title>
+<link rel="preload" href="/static/fonts/newsreader-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/hanken-grotesk-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="icon" type="image/svg+xml" href="/static/brand/favicon.svg">
 </head>
 <body>
 
+<a class="skip" href="#view">Skip to content</a>
+
 <header class="topbar">
   <a class="brand" href="#/library" aria-label="Diglota library">
-    <span class="brand-mark">D</span>
-    <span class="brand-name">Diglota</span>
+    <img class="brand-symbol brand-for-light" src="/static/brand/diglota-mark.svg" alt="" aria-hidden="true">
+    <img class="brand-symbol brand-for-dark" src="/static/brand/diglota-mark-night.svg" alt="" aria-hidden="true">
+    <img class="brand-word brand-for-light" src="/static/brand/diglota-wordmark.svg" alt="" aria-hidden="true">
+    <img class="brand-word brand-for-dark" src="/static/brand/diglota-wordmark-night.svg" alt="" aria-hidden="true">
   </a>
 
   <nav class="tabs" role="tablist">
@@ -32,9 +38,9 @@
     <button class="btn ghost" id="btn-import" title="Turn a link, or text you paste, into a lesson">Import</button>
     <button class="btn ghost" id="btn-settings" title="Your API key and model">Settings</button>
     <div class="theme-switch" role="group" aria-label="Theme">
-      <button data-theme-set="paper" title="Paper">◐</button>
-      <button data-theme-set="sepia" title="Sepia">◑</button>
-      <button data-theme-set="night" title="Night">◒</button>
+      <button data-theme-set="paper" title="Paper">Paper</button>
+      <button data-theme-set="sepia" title="Sepia">Sepia</button>
+      <button data-theme-set="night" title="Night">Night</button>
     </div>
   </div>
 </header>
@@ -45,7 +51,7 @@
      only appears once you have already scrolled past everything. -->
 <div id="reader-bar" class="reader-bar" hidden>
   <div class="reader-bar-inner">
-    <button class="btn ghost" id="reader-back" title="Back to the library (Esc)">← Library</button>
+    <button class="btn ghost" id="reader-back" title="Back to the library (Esc)">Back to library</button>
     <div class="reader-progress" title="How far through the article you are">
       <div class="reader-progress-fill" id="reader-progress-fill"></div>
     </div>
@@ -56,7 +62,7 @@
       <label class="toggle" title="Fade the English so the Spanish stands out (F)">
         <input type="checkbox" id="opt-dim"><span>Focus Spanish</span>
       </label>
-      <label class="toggle" title="Hide the English entirely — read only the Spanish (E)">
+      <label class="toggle" title="Hide the English entirely and read only the Spanish (E)">
         <input type="checkbox" id="opt-es-only"><span>Spanish only</span>
       </label>
       <div class="stepper" role="group" aria-label="Text size">
@@ -64,7 +70,7 @@
         <button id="font-up" title="Larger text">A+</button>
       </div>
       <button class="btn ghost sm" id="btn-read-aloud" title="Read the article aloud, sentence by sentence (R)">
-        ▶ Read aloud
+        Read aloud
       </button>
     </div>
   </div>
@@ -74,20 +80,20 @@
 
 <!-- Floating actions for text selected in the reader ---------------------- -->
 <div id="selection-bar" class="selection-bar" hidden>
-  <button data-sel="quote" title="Keep this sentence in your collection">🔖 Keep</button>
-  <button data-sel="speak" title="Hear it read aloud">🔊 Hear</button>
-  <button data-sel="translate" title="Translate the selection">🌐 Translate</button>
-  <button data-sel="explain" title="Explain the grammar">💡 Explain</button>
+  <button data-sel="quote" title="Keep this sentence in your collection">Keep</button>
+  <button data-sel="speak" title="Hear it read aloud">Hear</button>
+  <button data-sel="translate" title="Translate the selection">Translate</button>
+  <button data-sel="explain" title="Explain the grammar">Explain</button>
 </div>
 
 <!-- Word popup ------------------------------------------------------------- -->
 <div id="popover" class="popover" hidden>
   <div class="popover-head">
     <div>
-      <div class="popover-term" id="pop-term">—</div>
+      <div class="popover-term" id="pop-term"></div>
       <div class="popover-sub" id="pop-sub"></div>
     </div>
-    <button class="icon-btn" id="pop-close" title="Close (Esc)">✕</button>
+    <button class="btn ghost xs" id="pop-close" aria-label="Close the word panel (Esc)">Close</button>
   </div>
   <div class="popover-body" id="pop-body"></div>
   <div class="popover-actions" id="pop-actions"></div>
@@ -98,7 +104,7 @@
   <div class="modal-card" role="dialog" aria-modal="true">
     <div class="modal-head">
       <h2 id="modal-title">Title</h2>
-      <button class="icon-btn" id="modal-close" title="Close (Esc)">✕</button>
+      <button class="btn ghost xs" id="modal-close" title="Close (Esc)" aria-label="Close (Esc)">Close</button>
     </div>
     <div class="modal-body" id="modal-body"></div>
   </div>
@@ -108,14 +114,14 @@
 <aside id="activity" class="activity" hidden aria-label="Background activity">
   <div class="activity-head">
     <h2>Activity</h2>
-    <button class="icon-btn" id="activity-clear" title="Clear finished jobs">Clear</button>
-    <button class="icon-btn" id="activity-close" title="Close (Esc)">✕</button>
+    <button class="btn ghost xs" id="activity-clear" title="Clear finished jobs">Clear</button>
+    <button class="btn ghost xs" id="activity-close" title="Close (Esc)" aria-label="Close activity (Esc)">Close</button>
   </div>
   <div class="activity-list" id="activity-list"></div>
 </aside>
 
 <div id="toasts" class="toasts"></div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

@@ -95,7 +95,7 @@ def server(tmp_path, monkeypatch):
 
 def test_job_title_reads_like_a_title_not_a_url():
     title = _job_title("https://en.wikipedia.org/wiki/Why_We_Sleep", None)
-    assert title == "Why We Sleep · en.wikipedia.org"
+    assert title == "Why We Sleep, en.wikipedia.org"
 
 
 def test_job_title_prefers_an_explicit_hint():

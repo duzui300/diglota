@@ -250,7 +250,7 @@ def prompt_for(
                        f"{', '.join(words)}. {MIN_WORDS}–{COMFORTABLE_WORDS} words.")
     elif topic:
         instruction = (f"Write about {topic}. {MIN_WORDS}–{COMFORTABLE_WORDS} words. "
-                       "Do not use a dictionary — reach for what you have.")
+                       "Do not use a dictionary: reach for what you have.")
     elif words:
         instruction = (f"Write a short piece using these words: {', '.join(words)}. "
                        f"{MIN_WORDS}–{COMFORTABLE_WORDS} words.")
@@ -332,7 +332,7 @@ def usage_note(reading: Reading) -> str:
         return "Nothing written yet."
     if reading.spanish_share < 0.5:
         return (f"{round((1 - reading.spanish_share) * 100)}% of this is English. "
-                f"That is a normal first attempt — try again and push the Spanish share up.")
+                f"That is a normal first attempt. Try again and push the Spanish share up.")
     if not reading.enough:
         return (f"{reading.words} words. Worth going further: the interesting problems "
                 f"appear after the first easy sentences.")

@@ -175,7 +175,7 @@ class JobManager:
                 )
                 if job.running:
                     job.status = FAILED
-                    job.error = "interrupted — the server restarted while this was running"
+                    job.error = "interrupted: the server restarted while this was running"
                     self._persist(job)
                 self._jobs[job.id] = job
                 self._order.append(job.id)
