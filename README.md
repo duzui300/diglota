@@ -7,6 +7,7 @@
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/platform-Web%20%7C%20Windows-lightgrey" alt="Platform: Web and Windows" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" /></a>
   <a href="https://github.com/duzui300/diglota"><img src="https://img.shields.io/badge/AI-Optional%20%7C%20Local--First-black" alt="Optional AI" /></a>
+  <a href="https://hub.xerj.org/contributors/duzui300"><img src="https://hub.xerj.org/contributors/duzui300/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
 
 </p>
 
