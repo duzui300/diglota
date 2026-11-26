@@ -28,8 +28,11 @@ Three things make the output usable rather than merely Spanish-flavoured:
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import re
 import textwrap
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,6 +41,7 @@ from typing import Any, Sequence
 from .diglot import parse_article, parse_spans
 from .fetch import (MIN_SOURCE_WORDS, MIN_WRITING_WORDS, FetchError, blocks_from_text,
                     extract_article, fetch_url, split_paragraphs)
+from .languages import DEFAULT_PAIR, LanguagePair, get_pair_or_default
 from .levels import (
     DEFAULT_LEVEL,
     Level,
@@ -49,14 +53,16 @@ from .levels import (
     tolerance_for,
 )
 from . import registers
-from .llm import LLMError
+from .llm import LLMError, LLMResult, _strip_thinking
 from .tutor import SYSTEM, Tutor, cache_key
 
-# Words per weaving call. Long enough that the model can hold a thread of
-# argument, short enough that it does not lose the instructions -- and short
-# enough that the answer fits comfortably inside a token budget the model also
-# wants to spend on hidden reasoning.
+log = logging.getLogger("diglot.ingest")
+
+# Words per weaving call. Local models stay compact at 420 words; cloud
+# endpoints pack 600 words per call (fits cleanly inside 8k output caps while
+# reducing round-trips and keeping good discourse continuity).
 CHUNK_WORDS = 420
+CLOUD_CHUNK_WORDS = 520
 
 # The amount of Spanish when nobody has asked for anything in particular --
 # the middle of the corpus's own range, and the "Balanced" preset. The learner
@@ -64,6 +70,85 @@ CHUNK_WORDS = 420
 TARGET_RATIO = 0.38
 
 PARAGRAPH_MARK = "@@@"
+_INLINE_GLOSS_RE = re.compile(r"\(\*[^*]+?\*\)")
+
+
+def _client_model(tutor: Any) -> str:
+    return str(getattr(getattr(tutor, "client", None), "model", "") or "").strip()
+
+
+def _sample_text(text: str, max_chars: int) -> str:
+    """Sample beginning, middle, and end of long text instead of truncating to the opening."""
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.5)
+    mid = int(max_chars * 0.25)
+    tail = max_chars - head - mid
+    mid_start = max(head, (len(text) - mid) // 2)
+    return (
+        text[:head].rstrip()
+        + "\n\n[...]\n\n"
+        + text[mid_start : mid_start + mid].strip()
+        + "\n\n[...]\n\n"
+        + text[-tail:].lstrip()
+    )
+
+
+def _prioritize_taught(items: Sequence[str], text: str, *, limit: int = 50) -> tuple[list[str], int]:
+    """Deduplicate already-taught items, ranking ones overlapping the text first."""
+    unique = list(dict.fromkeys(item.strip() for item in items if item and item.strip()))
+    if len(unique) <= limit:
+        return unique, 0
+    lowered = text.lower()
+    in_text: list[str] = []
+    other: list[str] = []
+    for item in unique:
+        tokens = [w for w in re.findall(r"[A-Za-zÀ-ÿ]+", item.lower()) if len(w) >= 4]
+        if tokens and any(tok in lowered for tok in tokens):
+            in_text.append(item)
+        else:
+            other.append(item)
+    chosen = (in_text + other)[:limit]
+    return chosen, max(0, len(unique) - len(chosen))
+
+
+class _UsageCounter:
+    """Thread-safe accumulator for LLM token usage and cache hits across an import."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.reasoning_tokens = 0
+        self.cached_tokens = 0
+        self.llm_calls = 0
+        self.cache_hits = 0
+
+    def add(self, result: Any) -> None:
+        if not isinstance(result, LLMResult):
+            return
+        with self._lock:
+            self.prompt_tokens += int(result.prompt_tokens or 0)
+            self.completion_tokens += int(result.completion_tokens or 0)
+            self.reasoning_tokens += int(result.reasoning_tokens or 0)
+            self.cached_tokens += int(result.cached_tokens or 0)
+            self.llm_calls += 1
+
+    def add_cache_hit(self) -> None:
+        with self._lock:
+            self.cache_hits += 1
+
+    def to_dict(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "reasoning_tokens": self.reasoning_tokens,
+                "cached_tokens": self.cached_tokens,
+                "total_tokens": self.prompt_tokens + self.completion_tokens,
+                "llm_calls": self.llm_calls,
+                "cache_hits": self.cache_hits,
+            }
 
 
 class ImportError_(RuntimeError):
@@ -106,24 +191,45 @@ class WovenChunk:
 
 def weave_cache_key(
     chunk: str, focus: list[dict[str, str]], target: float, level: Level,
-    weave: Weave | str | None = None,
+    weave: Weave | str | None = None, *, model: str = "", pair: LanguagePair | None = None,
 ) -> str:
     """Identify a woven passage by everything that determines its output.
 
-    The point is that a *retry* is cheap. Weaving twelve passages takes about
-    ten minutes; when one fails, or the server restarts mid-import, everything
-    that already succeeded should be reused rather than paid for twice. Keying
-    on the passage, the focus list, the amount, the level and the grain means a
-    genuine change to any of them misses the cache, as it should -- and the
-    grain is in there because the same passage at the same amount is a
-    completely different text depending on the unit it arrives in.
+    Keying on passage, focus list, amount, level, grain, and model means a retry
+    or resumed import reuses good passages while switching to a stronger model
+    never resurrects an earlier weak weave.
     """
     digest = hashlib.sha256()
     digest.update(chunk.encode("utf-8"))
     digest.update(b"|")
     digest.update("|".join(sorted(item.get("es", "") for item in focus)).encode("utf-8"))
     digest.update(f"|{target:.3f}|{level.code}|{resolve_weave(weave).code}".encode("utf-8"))
-    return cache_key("weave", digest.hexdigest()[:24])
+    if model:
+        digest.update(f"|{model}".encode("utf-8"))
+    return cache_key("weave", digest.hexdigest()[:24], pair=pair)
+
+
+def focus_cache_key(
+    text: str, level: Level, *, model: str = "", pair: LanguagePair | None = None,
+) -> str:
+    """Cache key for article focus-vocabulary selection so retries keep the same focus list."""
+    digest = hashlib.sha256()
+    digest.update(text.encode("utf-8"))
+    digest.update(f"|{level.code}|{model}".encode("utf-8"))
+    return cache_key("focus", digest.hexdigest()[:24], pair=pair)
+
+
+def anchors_cache_key(
+    woven: str, focus: list[dict[str, str]], *, model: str = "", pair: LanguagePair | None = None,
+) -> str:
+    """Cache key for post-reading vocabulary and grammar anchors."""
+    digest = hashlib.sha256()
+    digest.update(woven.encode("utf-8"))
+    digest.update(b"|")
+    digest.update("|".join(sorted(item.get("es", "") for item in focus)).encode("utf-8"))
+    if model:
+        digest.update(f"|{model}".encode("utf-8"))
+    return cache_key("anchors", digest.hexdigest()[:24], pair=pair)
 
 
 # --------------------------------------------------------------------------- #
@@ -133,22 +239,13 @@ def weave_cache_key(
 
 def choose_focus_vocabulary(
     tutor: Tutor, *, title: str, text: str, count: int = 6, level: Level | None = None,
-    already_taught: Sequence[str] | None = None,
+    already_taught: Sequence[str] | None = None, pair: LanguagePair | None = None,
+    usage: _UsageCounter | None = None,
 ) -> list[dict[str, str]]:
-    """Pick the phrases the lesson will teach, before any weaving happens.
-
-    The model is asked for *useful* items -- constructions a learner at this
-    level would actually deploy -- rather than the rarest words in the text.
-    The level matters here more than anywhere else: the same article yields
-    "el sueño / dormir" for a beginner and "dar lugar a / se dio cuenta de" for
-    someone ready for periphrases.
-
-    ``already_taught`` is what the reader's other lessons have already made the focus
-    vocabulary, and it is here because the chooser had no memory: it converged, and
-    every new lesson came back with *darse cuenta de* whether or not that passage had
-    anything to do with realising something. Each lesson should add something the
-    shelf does not already have.
-    """
+    """Pick the phrases the lesson will teach, before any weaving happens."""
+    resolved = pair or getattr(tutor, "pair", None) or DEFAULT_PAIR
+    target_name = resolved.target.name
+    base_name = resolved.base.name
     level = level or resolve_level(None)
     level_rules = (
         f"The learner is at roughly {level.code} ({level.name}). Choose words and "
@@ -156,17 +253,13 @@ def choose_focus_vocabulary(
         if level.code != "auto" else
         f"Choose words and constructions at roughly the level of the article: {level.vocabulary}"
     )
-    # Named, not merely counted, so the model can see what it is being asked to avoid
-    # -- and capped, because a shelf of fifty lessons would otherwise push the article
-    # itself out of the prompt. How many were dropped is stated, because a silently
-    # shortened list reads as "that is everything they know".
-    taught = [item.strip() for item in (already_taught or []) if item and item.strip()]
     avoid_block = ""
-    if taught:
-        unique = list(dict.fromkeys(taught))
-        listed = "\n".join(f"- {item}" for item in unique[:150])
-        more = f"\n(and {len(unique) - 150} more, also already taught)" if len(unique) > 150 else ""
-        avoid_block = f"""
+    if already_taught:
+        chosen_avoid, omitted = _prioritize_taught(already_taught, text, limit=50)
+        if chosen_avoid:
+            listed = "\n".join(f"- {item}" for item in chosen_avoid)
+            more = f"\n(and {omitted} more, also already taught)" if omitted else ""
+            avoid_block = f"""
 The reader has already been taught these -- they are in lessons they have, or in their
 own deck. Do not choose any of them again. Pick the words and constructions *this*
 passage actually uses that are not on the list: the point of a new lesson is that it
@@ -174,39 +267,42 @@ adds something rather than teaching the same few phrases for the tenth time.
 
 {listed}{more}
 """
+    sample = _sample_text(text, 5000)
     prompt = f"""You are choosing the vocabulary to teach in a diglot lesson built from this article.
 
-Title: {title}
-
----
-{text[:5000]}
----
-{avoid_block}
-Choose exactly {count} Spanish words or short phrases that:
+Choose exactly {count} {target_name} words or short phrases that:
 - recur naturally in a text like this, so they can appear several times;
-- are useful to an English speaker who reads but does not yet write Spanish;
+- are useful to an {base_name} speaker who reads but does not yet write {target_name};
 - include at least two multi-word constructions (a periphrastic verb, a
   conjunctive phrase, a reflexive verb) rather than only single nouns.
-- appear in the text above: pick what this passage actually says, not what a text
+- appear in the text below: pick what this passage actually says, not what a text
   like it might say.
 
 {level_rules}
 Do not repeat what is essentially the same item twice: if you choose
 "relacionado con", do not also return "relacionada con" and "estar relacionado con".
-
+{avoid_block}
 Return JSON:
 {{
   "items": [
     {{
-      "es": "the Spanish, in the form it would appear in a sentence",
-      "en": "its English meaning, 1-4 words",
+      "es": "the {target_name}, in the form it would appear in a sentence",
+      "en": "its {base_name} meaning, 1-4 words",
       "kind": "one of: verb, noun, adjective, connector, phrase",
       "why": "why this is worth teaching here, at most 12 words"
     }}
   ],
-  "level": "the CEFR level of the Spanish you actually chose, A1-C1"
-}}"""
-    data, _ = tutor.client.complete_json(prompt, system=SYSTEM, max_tokens=1200)
+  "level": "the CEFR level of the {target_name} you actually chose, A1-C1"
+}}
+
+Title: {title}
+
+---
+{sample}
+---"""
+    data, llm_res = tutor.client.complete_json(prompt, system=resolved.system_prompt(), max_tokens=4000)
+    if usage is not None:
+        usage.add(llm_res)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list) or not items:
         raise ImportError_("the tutor did not return a usable vocabulary list")
@@ -350,49 +446,78 @@ PASSAGE
 {chunk}"""
 
 
-def _ratio_of(text: str) -> float:
-    """Share of words the segmenter reads as Spanish, for one passage."""
+def _ratio_of(text: str, *, pair: LanguagePair | None = None) -> float:
+    """Share of words the segmenter reads as target language, for one passage."""
     if not text.strip():
         return 0.0
-    es = en = 0
-    for span in parse_spans(" ".join(text.split())):
-        n = len(re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", span.text))
-        if span.lang == "es":
-            es += n
+    resolved = pair or DEFAULT_PAIR
+    target_code = resolved.target.code
+    target_n = base_n = 0
+    for span in parse_spans(" ".join(text.split()), pair=resolved):
+        if span.lang == target_code:
+            target_n += resolved.target.count_units(span.text)
         else:
-            en += n
-    total = es + en
-    return es / total if total else 0.0
+            base_n += resolved.base.count_units(span.text)
+    total = target_n + base_n
+    return target_n / total if total else 0.0
 
 
-def _measure(text: str) -> float:
-    """Share of words the segmenter reads as Spanish. Uses the real parser, so
-    the number measured is the number the reader will act on."""
-    return _ratio_of(text)
+def _measure(text: str, *, pair: LanguagePair | None = None) -> float:
+    """Share of words the segmenter reads as target language."""
+    return _ratio_of(text, pair=pair)
 
 
-# How unevenly the Spanish may be spread before a chunk is rewoven. The
-# article-wide average was hiding this: a lesson asked for at 22% came out with
-# paragraphs between 12% and 61%, because the model would leave several
-# sentences untouched and then translate a whole paragraph at once.
+def _prose_word_count(text: str) -> int:
+    """Word count excluding inline parenthesized glosses ``(*...*)``."""
+    stripped = _INLINE_GLOSS_RE.sub("", text or "")
+    return len(stripped.split())
+
+
+# How unevenly the target language may be spread before a chunk is rewoven.
 SPREAD_LIMIT = 0.62
-
-# The same measure at sentence grain, where unevenness is the form rather than a
-# fault: a five-sentence paragraph with one Spanish sentence is 20% Spanish and
-# the next with two is 40%, so a paragraph-level spread of 20 points is normal
-# and unavoidable. This limit only catches the case the rule exists for -- one
-# paragraph translated end to end while its neighbours are untouched.
 SENTENCE_SPREAD_LIMIT = 0.86
 MIN_PARAGRAPH_WORDS = 30
 
 
-def _spread(paragraphs: list[str], *, floor: int = MIN_PARAGRAPH_WORDS) -> float:
-    """The gap between the least and most Spanish paragraph.
+_QUOTE_SPAN_RE = re.compile(r'["“][^"”]{8,}["”]')
 
-    The average alone cannot express what a reader experiences, which is one
-    paragraph at a time. This is that, as a single number.
+
+def _is_quote_heavy(text: str) -> bool:
+    """True when half or more of a paragraph is direct quoted speech (left in English by rule)."""
+    if not text:
+        return False
+    quoted = sum(len(m.group(0)) for m in _QUOTE_SPAN_RE.finditer(text))
+    return quoted >= len(text) * 0.45
+
+
+def _sentence_count(text: str) -> int:
+    parts = [s for s in re.split(r"[.!?。！？]+(?:\s|$)", text.strip()) if s.strip()]
+    return len(parts)
+
+
+def _spread(
+    paragraphs: list[str],
+    *,
+    floor: int = MIN_PARAGRAPH_WORDS,
+    pair: LanguagePair | None = None,
+    sentence_mode: bool = False,
+) -> float:
+    """The gap between the least and most target-language paragraph.
+
+    In whole-sentence mode, single-sentence paragraphs and direct-quote
+    paragraphs are naturally 0% or 100% target language and are excluded so
+    journalistic prose with short ledes or block quotes is not needlessly
+    rewritten.
     """
-    ratios = [_ratio_of(p) for p in paragraphs if len(p.split()) >= floor]
+    eligible: list[str] = []
+    for p in paragraphs:
+        words = len(p.split())
+        if words < floor:
+            continue
+        if sentence_mode and (_sentence_count(p) < 2 or _is_quote_heavy(p)):
+            continue
+        eligible.append(p)
+    ratios = [_ratio_of(p, pair=pair) for p in eligible]
     if len(ratios) < 2:
         return 0.0
     return max(ratios) - min(ratios)
@@ -447,50 +572,68 @@ def _redistribute(paragraphs: list[str], wanted: list[str]) -> list[str]:
 def weave_chunk(
     tutor: Tutor, *, chunk: str, focus: list[dict[str, str]], target: float = TARGET_RATIO,
     level: Level | None = None, weave: Weave | str | None = None,
+    pair: LanguagePair | None = None, usage: _UsageCounter | None = None,
+    progress: Any = None, chunk_label: str = "",
 ) -> WovenChunk:
-    """Weave one chunk, measuring the result and retrying once if it is off.
-
-    Two failure modes are handled rather than propagated. A model that returns
-    *nothing* is retried paragraph by paragraph -- short inputs almost always
-    come back, and a chunk that weaves four paragraphs out of five is a lesson,
-    whereas a chunk that raises is a failed import. A model that returns the
-    *wrong amount* of Spanish is retried once with the measurement quoted back
-    at it.
-
-    Both gates -- how far the amount may drift, and how unevenly it may be spread
-    -- are looser when the unit is a whole sentence, because the amount is
-    quantised by sentences and an even spread is not something a sentence-grain
-    weave can offer. Judged by the phrase-grain limits, a perfectly good
-    sentence-level passage would be rejected and rewoven forever.
-    """
+    """Weave one chunk, measuring the result, retrying with feedback, and keeping the best attempt."""
+    resolved = pair or getattr(tutor, "pair", None) or DEFAULT_PAIR
+    target_name = resolved.target.name
     level = level or resolve_level(None)
     grain = resolve_weave(weave)
     tolerance = tolerance_for(target, grain)
     spread_limit = SPREAD_LIMIT if grain.mixes_within_a_sentence else SENTENCE_SPREAD_LIMIT
     wanted = [p for p in chunk.split("\n") if p.strip()]
+    source_words = len(chunk.split())
+    # Give enough initial headroom for always-on reasoning models even when
+    # choose_focus_vocabulary hit cache (non-reasoning models ignore extra
+    # ceiling at zero cost; providers with 8k caps auto-adapt on HTTP 400).
+    budget = min(20000, max(12000, int(source_words * 10.0) + 4000))
+
     result = WovenChunk(paragraphs=[])
     feedback: str | None = None
-    # What the prompt asks for, which stops being what the reader asked for as
-    # soon as an attempt comes back off target.
-    #
-    # Re-asking for the same number with a note saying it was wrong is what made
-    # this loop oscillate: the density instruction is *chosen from* the number,
-    # so the retry built the same instruction the model had already ignored, and
-    # the model's answer landed in the same place. Correcting the number means
-    # the retry also crosses into a different density instruction, which is the
-    # thing the model actually responds to.
     ask = target
 
+    best_score: tuple[int, int, float, float] | None = None
+    best_snapshot: tuple[list[str], float, float, int] | None = None
+    consecutive_llm_errors = 0
+    last_llm_error: LLMError | None = None
+
+    def _report(detail: str) -> None:
+        if progress is not None and chunk_label:
+            progress.step(f"Weaving {target_name} into the text", detail=f"{chunk_label} ({detail})")
+
     for attempt in (1, 2, 3):
+        if progress is not None:
+            progress.check()
+        if attempt > 1:
+            _report(f"attempt {attempt}/3")
         prompt = _weave_prompt(chunk=chunk, focus=focus, target=ask, level=level,
                                weave=grain, feedback=feedback)
         try:
-            response = tutor.client.complete(prompt, system=SYSTEM, max_tokens=8000, temperature=0.5)
+            response = tutor.client.complete(
+                prompt,
+                system=resolved.system_prompt(),
+                max_tokens=budget,
+                temperature=0.5,
+                effort="low",
+                attempts=2,
+                stream=True,
+                cancel_check=(progress.check if progress is not None else None),
+            )
+            if usage is not None:
+                usage.add(response)
+            consecutive_llm_errors = 0
         except LLMError as exc:
-            # A chunk that cannot be generated must not take the whole import
-            # down with it -- the paragraph fallback below is the safety net.
+            last_llm_error = exc
+            consecutive_llm_errors += 1
             result.notes.append(f"attempt {attempt}: {exc}")
+            log.warning("weave %s attempt %d failed: %s", chunk_label or "chunk", attempt, exc)
+            if getattr(exc, "fatal", False):
+                raise ImportError_(f"weave model rejected the request: {exc}") from None
             feedback = None
+            if consecutive_llm_errors >= 2:
+                # Two consecutive transport/model failures on the same chunk: stop spinning.
+                break
             continue
         paragraphs = _split_paragraphs(response.text)
         if not paragraphs:
@@ -498,8 +641,6 @@ def weave_chunk(
             result.notes.append(f"attempt {attempt}: empty output")
             continue
 
-        # Repair the structure before measuring anything: a merged blob would
-        # otherwise be judged -- and shown -- as one enormous paragraph.
         if len(paragraphs) < len(wanted) and len(wanted) > 1:
             repaired = _redistribute(paragraphs, wanted)
             result.notes.append(
@@ -509,11 +650,31 @@ def weave_chunk(
             paragraphs = repaired
 
         blob = "\n\n".join(paragraphs)
-        ratio = _measure(blob)
-        spread = _spread(paragraphs)
-        source_words = len(chunk.split())
-        output_words = len(blob.split())
+        ratio = _measure(blob, pair=resolved)
+        sentence_mode = not grain.mixes_within_a_sentence
+        spread = _spread(
+            paragraphs,
+            floor=(55 if sentence_mode else MIN_PARAGRAPH_WORDS),
+            pair=resolved,
+            sentence_mode=sentence_mode,
+        )
+        output_words = _prose_word_count(blob)
         kept = output_words / source_words if source_words else 1.0
+
+        truncated = kept < MIN_LENGTH_RATIO
+        amount_off = abs(ratio - target) > tolerance
+        lumpy = spread > spread_limit
+
+        score = (
+            0 if truncated else 1,
+            1 if len(paragraphs) == len(wanted) else 0,
+            -abs(ratio - target),
+            -max(0.0, spread - spread_limit),
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_snapshot = (paragraphs, ratio, spread, attempt)
+
         result.attempts = attempt
         result.ratio = ratio
         result.spread = spread
@@ -524,14 +685,9 @@ def weave_chunk(
                 f"attempt {attempt}: {len(paragraphs)} paragraphs for {len(wanted)} input paragraphs"
             )
 
-        truncated = kept < MIN_LENGTH_RATIO
-        amount_off = abs(ratio - target) > tolerance
-        lumpy = spread > spread_limit
         if not truncated and not amount_off and not lumpy:
             return result
 
-        # Say everything that is wrong, not just the first thing. Asking only
-        # about the amount leaves a shortened passage to survive the attempt.
         problems: list[str] = []
         if truncated:
             problems.append(
@@ -541,58 +697,80 @@ def weave_chunk(
             )
             result.notes.append(f"attempt {attempt}: kept only {kept:.0%} of the words, retrying")
         if amount_off:
-            # Correct by the error against what was *asked*, not against the
-            # reader's target -- and say the corrected number out loud so the
-            # instruction is concrete.
-            #
-            # Measuring against the target double-counts the previous correction.
-            # A live run showed what that does: asked 54%, came back 81% (too
-            # high), so the retry asked 27%. The model obeyed and produced 29%,
-            # which is close to the ask and far from the target -- so correcting
-            # against the target swung the next ask to 79%, and the loop
-            # oscillated instead of converging. The model's error is measured
-            # from the number it was given.
             error = ratio - ask
             ask = round(min(0.85, max(0.06, ask - error)), 3)
             direction = "less" if error > 0 else "more"
             problems.append(
-                f"It came out {ratio:.0%} Spanish and the target is {target:.0%}. "
-                f"Use noticeably {direction} Spanish this time -- aim for about {ask:.0%}."
+                f"It came out {ratio:.0%} {target_name} and the target is {target:.0%}. "
+                f"Use noticeably {direction} {target_name} this time -- aim for about {ask:.0%}."
             )
         if lumpy:
             problems.append(
-                f"The Spanish is unevenly spread -- some paragraphs are {spread:.0%} apart in how "
+                f"The {target_name} is unevenly spread -- some paragraphs are {spread:.0%} apart in how "
                 "much they carry. Keep the amount the same but distribute it evenly: a phrase in "
-                "most sentences, rather than a run of untouched English then a whole Spanish paragraph."
+                f"most sentences, rather than a run of untouched English then a whole {target_name} paragraph."
             )
         feedback = " ".join(problems)
         if not truncated:
             result.notes.append(
-                f"attempt {attempt}: {ratio:.0%} Spanish"
+                f"attempt {attempt}: {ratio:.0%} {target_name}"
                 + (f", {spread:.0%} spread" if lumpy else "")
                 + (f", retrying at {ask:.0%}" if amount_off else ", retrying")
             )
 
+    # Keep the best-scoring attempt across retries instead of blindly taking an oscillated last run.
+    if best_snapshot is not None:
+        best_paragraphs, best_ratio, best_spread, best_attempt = best_snapshot
+        if best_attempt != result.attempts:
+            result.notes.append(f"kept best attempt ({best_attempt} at {best_ratio:.0%})")
+        result.paragraphs = best_paragraphs
+        result.ratio = best_ratio
+        result.spread = best_spread
+
     if not result.paragraphs and wanted:
-        # Last resort: weave smaller pieces. A single-paragraph chunk has
-        # nothing smaller to fall back to, so it is split into sentences --
-        # short inputs come back when long ones do not.
+        # Only fall back to smaller pieces when chunk size may have caused the failure;
+        # abort fast if consecutive pieces fail with LLM errors so a broken endpoint
+        # never burns dozens of retries while the UI appears stuck.
         if len(wanted) > 1:
             pieces = wanted
             result.notes.append("falling back to paragraph-by-paragraph weaving")
+            _report(f"splitting into {len(pieces)} paragraphs")
+        elif last_llm_error is not None and consecutive_llm_errors >= 2:
+            raise ImportError_(f"weave model failed: {last_llm_error}") from None
         else:
             pieces = [s for s in re.split(r"(?<=[.!?])\s+", wanted[0]) if s.strip()]
             result.notes.append(f"falling back to sentence-by-sentence weaving ({len(pieces)} sentences)")
+            _report(f"splitting into {len(pieces)} sentences")
         if not pieces:
             return result
 
         salvaged: list[str] = []
-        for piece in pieces:
-            prompt = _weave_prompt(chunk=piece, focus=focus, target=target, level=level)
+        piece_errors = 0
+        for idx, piece in enumerate(pieces, start=1):
+            if progress is not None:
+                progress.check()
+            prompt = _weave_prompt(chunk=piece, focus=focus, target=target, level=level, weave=grain)
+            piece_budget = min(5000, max(1500, int(len(piece.split()) * 5.0) + 800))
             try:
-                response = tutor.client.complete(prompt, system=SYSTEM, max_tokens=5000, temperature=0.5)
-            except LLMError as exc:  # keep whatever we already have
-                result.notes.append(f"piece failed: {exc}")
+                response = tutor.client.complete(
+                    prompt,
+                    system=resolved.system_prompt(),
+                    max_tokens=piece_budget,
+                    temperature=0.5,
+                    effort="low",
+                    attempts=1,
+                    stream=True,
+                    cancel_check=(progress.check if progress is not None else None),
+                )
+                if usage is not None:
+                    usage.add(response)
+                piece_errors = 0
+            except LLMError as exc:
+                piece_errors += 1
+                result.notes.append(f"piece {idx} failed: {exc}")
+                log.warning("weave %s piece %d/%d failed: %s", chunk_label or "chunk", idx, len(pieces), exc)
+                if getattr(exc, "fatal", False) or piece_errors >= 2:
+                    raise ImportError_(f"weave model failed: {exc}") from None
                 salvaged.append(piece)
                 continue
             parts = _split_paragraphs(response.text)
@@ -601,15 +779,24 @@ def weave_chunk(
         if len(wanted) > 1:
             result.paragraphs = salvaged
         else:
-            # The sentence pieces belong to one paragraph; put them back as one.
             result.paragraphs = [" ".join(salvaged)]
-        result.ratio = _measure("\n\n".join(result.paragraphs))
+        result.ratio = _measure("\n\n".join(result.paragraphs), pair=resolved)
 
     return result
 
 
 def _split_paragraphs(text: str) -> list[str]:
+    text = _strip_thinking(text or "")
     text = re.sub(r"^\s*```[a-z]*\s*$", "", text, flags=re.M).strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and isinstance(parsed.get("paragraphs"), list):
+                items = [re.sub(r"\s+", " ", str(p)).strip() for p in parsed["paragraphs"] if str(p).strip()]
+                if items:
+                    return items
+        except json.JSONDecodeError:
+            pass
     if PARAGRAPH_MARK in text:
         parts = [p.strip() for p in text.split(PARAGRAPH_MARK)]
     else:
@@ -675,60 +862,61 @@ def _chunk_pieces(pieces: list[tuple[str, str]], max_words: int = CHUNK_WORDS
 # --------------------------------------------------------------------------- #
 
 
-def build_anchors(tutor: Tutor, *, title: str, woven: str, focus: list[dict[str, str]],
-                  already_explained: Sequence[str] | None = None) -> tuple[list[dict], list[dict]]:
-    """Generate the post-reading Recycled Vocabulary Box and Grammar Breakdown.
-
-    Quoting the *woven* text back, not the source, is deliberate: the examples
-    have to be sentences the learner has actually read.
-
-    ``already_explained`` names the grammar the reader's other lessons have already
-    broken down, for the same reason the focus chooser is told what it taught: left
-    to itself it returns a good general note about this kind of prose every time, and
-    the reader meets the same three explanations in every lesson.
-    """
-    taught = [item.strip() for item in (already_explained or []) if item and item.strip()]
+def build_anchors(
+    tutor: Tutor, *, title: str, woven: str, focus: list[dict[str, str]],
+    already_explained: Sequence[str] | None = None,
+    pair: LanguagePair | None = None, usage: _UsageCounter | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Generate the post-reading Recycled Vocabulary Box and Grammar Breakdown."""
+    resolved = pair or getattr(tutor, "pair", None) or DEFAULT_PAIR
+    target_name = resolved.target.name
+    base_name = resolved.base.name
     avoid_block = ""
-    if taught:
-        listed = "\n".join(f"- {item}" for item in list(dict.fromkeys(taught))[:80])
-        avoid_block = f"""
+    if already_explained:
+        chosen_avoid, _ = _prioritize_taught(already_explained, woven, limit=40)
+        if chosen_avoid:
+            listed = "\n".join(f"- {item}" for item in chosen_avoid)
+            avoid_block = f"""
 These constructions have already been explained in the reader's other lessons. Do not
 write about them again unless this lesson is genuinely the clearest place to meet them:
 pick the grammar this passage actually exercises that is not on this list.
 
 {listed}
 """
-    prompt = f"""Here is a diglot lesson -- English prose with Spanish woven into it -- that a learner has just read.
+    sample = _sample_text(woven, 6000)
+    prompt = f"""Produce the post-reading anchors for this diglot lesson ({base_name} prose with {target_name} woven into it).
+
+1. "vocab": for each focus item, the headword, its {base_name} gloss, and 2-3 examples
+   of it **copied verbatim from the lesson text below**, each with a short {base_name}
+   translation in italics in parentheses.
+2. "grammar": exactly 3 notes on the grammar the lesson actually exercises.
+   Each note names a construction, quotes a real sentence from the lesson, and
+   explains in 2-4 sentences of {base_name} why it works that way and what a learner
+   gets wrong about it. The sentence quoted must be in the lesson text below.
+{avoid_block}
+Return JSON:
+{{
+  "vocab": [
+    {{"term": "headword / inflected forms", "gloss": "to ...", "examples": ["{target_name} sentence ({base_name} translation)", "..."]}}
+  ],
+  "grammar": [
+    {{"title": "Name of the construction", "example": "the {target_name} sentence from the lesson", "explanation": "2-4 sentences of {base_name}"}}
+  ]
+}}
+
+The lesson was built around these focus items:
+{chr(10).join(f"- {i['es']} ({i.get('en','')})" for i in focus)}
 
 Title: {title}
 
 ---
-{woven[:6000]}
----
-{avoid_block}
-The lesson was built around these focus items:
-{chr(10).join(f"- {i['es']} ({i.get('en','')})" for i in focus)}
-
-Produce the post-reading anchors.
-
-1. "vocab": for each focus item, the headword, its English gloss, and 2-3 examples
-   of it **copied verbatim from the lesson text above**, each with a short English
-   translation in italics in parentheses.
-2. "grammar": exactly 3 notes on the grammar the lesson actually exercises.
-   Each note names a construction, quotes a real sentence from the lesson, and
-   explains in 2-4 sentences of English why it works that way and what a learner
-   gets wrong about it. The sentence quoted must be in the lesson text above.
-
-Return JSON:
-{{
-  "vocab": [
-    {{"term": "headword / inflected forms", "gloss": "to ...", "examples": ["Spanish sentence (English translation)", "..."]}}
-  ],
-  "grammar": [
-    {{"title": "Name of the construction", "example": "the Spanish sentence from the lesson", "explanation": "2-4 sentences of English"}}
-  ]
-}}"""
-    data, _ = tutor.client.complete_json(prompt, system=SYSTEM, max_tokens=2600, effort="medium")
+{sample}
+---"""
+    data, llm_res = tutor.client.complete_json(
+        prompt, system=resolved.system_prompt(), max_tokens=6000, effort="low",
+    )
+    if usage is not None:
+        usage.add(llm_res)
     vocab = data.get("vocab") if isinstance(data, dict) else None
     grammar = data.get("grammar") if isinstance(data, dict) else None
     return (
@@ -1038,7 +1226,16 @@ def import_article(
     heading_count = sum(1 for kind, _ in pieces if kind == "h")
 
     whole = "\n\n".join(paragraphs)
-    groups, layout = _chunk_pieces(pieces)
+    pair = get_pair_or_default(getattr(settings, "active_pair", None))
+    model_name = _client_model(tutor)
+    is_local_model = bool(getattr(getattr(tutor, "client", None), "is_local", False))
+    has_api_key = bool(getattr(getattr(tutor, "client", None), "api_key", ""))
+    # A localhost endpoint *without* an API key is typically single-slot Ollama/LM Studio;
+    # a localhost gateway *with* an API key (e.g. Magpie/LiteLLM) forwards to cloud APIs.
+    single_slot_local = is_local_model and not has_api_key
+    chunk_limit = CHUNK_WORDS if single_slot_local else CLOUD_CHUNK_WORDS
+    groups, layout = _chunk_pieces(pieces, max_words=chunk_limit)
+    usage = _UsageCounter()
 
     # Everything after the page is fetched is known up front, so the bar can be
     # honest from here on: one unit for vocabulary, one per passage, one each
@@ -1046,52 +1243,105 @@ def import_article(
     total_units = len(groups) + 3
     progress.step(f"Choosing the vocabulary to teach ({len(groups)} passages to weave)",
                   done=2, total=total_units)
-    focus = choose_focus_vocabulary(tutor, title=title, text=whole, level=requested_level,
-                                    already_taught=already_taught)
+    f_key = focus_cache_key(whole, requested_level, model=model_name, pair=pair)
+    cached_focus = cache.get(f_key) if cache is not None else None
+    if isinstance(cached_focus, list) and cached_focus:
+        focus = cached_focus
+        usage.add_cache_hit()
+    else:
+        try:
+            focus = choose_focus_vocabulary(
+                tutor, title=title, text=whole, level=requested_level,
+                already_taught=already_taught, pair=pair, usage=usage,
+            )
+        except TypeError:
+            # Preserve monkeypatched 4-arg test stubs for choose_focus_vocabulary.
+            focus = choose_focus_vocabulary(
+                tutor, title=title, text=whole, level=requested_level,
+                already_taught=already_taught,
+            )
+        if cache is not None and focus:
+            cache.put(f_key, focus)
     level: str | None = requested_level.code if requested_level.code != "auto" else None
     register: str | None = None
 
-    # Weave the chunks concurrently: each call is independent and takes seconds,
-    # and on a long article they are most of the wall-clock time. Progress is
-    # reported as each one lands rather than when the whole batch does.
     progress.check()
-    progress.step(f"Weaving Spanish into the text (aiming for {target:.0%})",
+    target_name = pair.target.name
+    progress.step(f"Weaving {target_name} into the text (aiming for {target:.0%})",
                   done=2, total=total_units)
 
-    def weave_one(group: list[str]) -> WovenChunk:
-        """Weave a passage, reusing an earlier identical one if there is one.
-
-        This is what makes a retry cheap. A twelve-passage weave is about ten
-        minutes; when one passage fails, or the server restarts mid-import,
-        everything that already succeeded should be kept rather than paid for a
-        second time. The key covers the passage, the focus list, the amount and
-        the level, so a genuine change to any of them misses -- as it should.
-        """
+    def weave_one(index: int, group: list[str]) -> WovenChunk:
+        """Weave a passage, reusing an earlier identical one for the same model."""
         chunk = "\n".join(group)
-        key = weave_cache_key(chunk, focus, target, requested_level, grain)
+        key = weave_cache_key(chunk, focus, target, requested_level, grain, model=model_name, pair=pair)
         if cache is not None:
             hit = cache.get(key)
             if hit:
+                usage.add_cache_hit()
                 return WovenChunk.from_dict(hit)
-        result = weave_chunk(tutor, chunk=chunk, focus=focus, target=target,
-                             level=requested_level, weave=grain)
+        label = f"passage {index + 1} of {len(groups)}"
+        try:
+            result = weave_chunk(
+                tutor, chunk=chunk, focus=focus, target=target,
+                level=requested_level, weave=grain, pair=pair, usage=usage,
+                progress=progress, chunk_label=label,
+            )
+        except TypeError:
+            # Preserve monkeypatched test stubs for weave_chunk.
+            result = weave_chunk(
+                tutor, chunk=chunk, focus=focus, target=target,
+                level=requested_level, weave=grain,
+            )
         if cache is not None and result.paragraphs:
             cache.put(key, result.to_dict())
         return result
 
     woven: list[WovenChunk] = [WovenChunk(paragraphs=[]) for _ in groups]
     done_units = 2
-    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
-        futures = {pool.submit(weave_one, group): index for index, group in enumerate(groups)}
-        for future in as_completed(futures):
-            index = futures[future]
+
+    def _record_chunk(index: int, result: WovenChunk) -> None:
+        nonlocal done_units
+        woven[index] = result
+        done_units += 1
+        progress.step(
+            f"Weaving {target_name} into the text", done=done_units, total=total_units,
+            detail=f"passage {done_units - 2} of {len(groups)}",
+        )
+
+    # Seed the provider's Prompt Prefix Cache with passage 0 before fanning out
+    # remaining passages so chunks 1..N hit the cached static instruction + focus prefix.
+    if groups:
+        progress.check()
+        progress.step(
+            f"Weaving {target_name} into the text", done=done_units, total=total_units,
+            detail=f"passage 1 of {len(groups)}",
+        )
+        # Fail fast if the very first passage fails fatally (broken model/endpoint/quota).
+        _record_chunk(0, weave_one(0, groups[0]))
+
+    remaining = list(enumerate(groups[1:], start=1))
+    if remaining:
+        max_workers = 1 if single_slot_local else min(3, len(remaining))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(weave_one, idx, group): idx for idx, group in remaining}
             try:
-                woven[index] = future.result()
-            except Exception as exc:  # a failed chunk falls back, it does not abort
-                woven[index] = WovenChunk(paragraphs=[], notes=[f"{type(exc).__name__}: {exc}"])
-            done_units += 1
-            progress.step("Weaving Spanish into the text", done=done_units, total=total_units,
-                          detail=f"passage {done_units - 2} of {len(groups)}")
+                for future in as_completed(futures):
+                    progress.check()
+                    idx = futures[future]
+                    try:
+                        chunk_result = future.result()
+                    except ImportError_:
+                        raise
+                    except Exception as exc:
+                        if type(exc).__name__ == "JobCancelled":
+                            raise
+                        log.warning("weave passage %d failed: %s: %s", idx + 1, type(exc).__name__, exc)
+                        chunk_result = WovenChunk(paragraphs=[], notes=[f"{type(exc).__name__}: {exc}"])
+                    _record_chunk(idx, chunk_result)
+            except BaseException:
+                for pending in futures:
+                    pending.cancel()
+                raise
     reused = sum(1 for result in woven if any("reused" in note for note in result.notes))
 
     # Reassemble in the source's order: headings as they were, woven groups
@@ -1116,53 +1366,64 @@ def import_article(
 
     out_paragraphs = [text for kind, text in out_items if kind == "p"]
     woven_text = "\n\n".join(out_paragraphs)
-    measured = _measure(woven_text)
-    spread = _spread(out_paragraphs)
-    # How much of the source survived. A dip here means content was summarised
-    # or cut -- the one failure mode a reader cannot see for themselves.
+    measured = _measure(woven_text, pair=pair)
+    sentence_mode = not grain.mixes_within_a_sentence
+    spread = _spread(
+        out_paragraphs,
+        floor=(55 if sentence_mode else MIN_PARAGRAPH_WORDS),
+        pair=pair,
+        sentence_mode=sentence_mode,
+    )
     source_words = len(whole.split())
-    retained = round(len(woven_text.split()) / source_words, 3) if source_words else 1.0
-    # The gate is the requested target, not a fixed band: asking for a light
-    # weave and being handed an immersion one is a failure even though 70% is a
-    # perfectly good number in itself. The tolerance is the grain's, because at
-    # sentence grain the pass was never going to land as close as a phrase-grain
-    # one -- see tolerance_for.
-    if abs(measured - target) > max(0.28, tolerance_for(target, grain) * 2.2):
+    retained = round(_prose_word_count(woven_text) / source_words, 3) if source_words else 1.0
+    if abs(measured - target) > max(0.32, tolerance_for(target, grain) * 2.5):
         raise ImportError_(
-            f"the weave came out {measured:.0%} Spanish against a target of {target:.0%}, "
+            f"the weave came out {measured:.0%} {target_name} against a target of {target:.0%}, "
             "which is too far off to be the lesson that was asked for -- try again, "
             "or pick a different amount"
         )
 
     progress.check()
     progress.step("Writing the post-reading notes", done=done_units, total=total_units)
-    # The weave is the expensive part and it is already done by now. If the
-    # post-reading notes fail, the lesson is still a lesson -- a DNS blip at
-    # this last step should not throw away eight minutes of work. So the
-    # anchors degrade to empty and the article is written anyway.
-    try:
-        vocab, grammar = build_anchors(tutor, title=title, woven=woven_text, focus=focus,
-                                       already_explained=already_explained)
-    except Exception as exc:
-        notes.append(f"post-reading notes could not be generated: {type(exc).__name__}: {exc}")
-        vocab, grammar = [], []
+    a_key = anchors_cache_key(woven_text, focus, model=model_name, pair=pair)
+    cached_anchors = cache.get(a_key) if cache is not None else None
+    if isinstance(cached_anchors, dict) and ("vocab" in cached_anchors or "grammar" in cached_anchors):
+        vocab = list(cached_anchors.get("vocab") or [])
+        grammar = list(cached_anchors.get("grammar") or [])
+        usage.add_cache_hit()
+    else:
+        try:
+            try:
+                vocab, grammar = build_anchors(
+                    tutor, title=title, woven=woven_text, focus=focus,
+                    already_explained=already_explained, pair=pair, usage=usage,
+                )
+            except TypeError:
+                vocab, grammar = build_anchors(
+                    tutor, title=title, woven=woven_text, focus=focus,
+                    already_explained=already_explained,
+                )
+            if cache is not None and (vocab or grammar):
+                cache.put(a_key, {"vocab": vocab, "grammar": grammar})
+        except Exception as exc:
+            notes.append(f"post-reading notes could not be generated: {type(exc).__name__}: {exc}")
+            vocab, grammar = [], []
     preview = textwrap.shorten(" ".join(paragraphs[0].split()), width=320, placeholder=" ...")
 
-    # Place the lesson on the CEFR scale -- but only when the learner asked the
-    # app to decide. If they picked a level, that is the level; overriding a
-    # deliberate choice with an estimate would be the app arguing with them.
-    if level is None and judge is not None and getattr(judge, "available", False):
-        progress.step("Placing the lesson on the CEFR scale", done=done_units + 1, total=total_units)
+    # Place the lesson on the CEFR scale and classify its register. If the
+    # learner picked a level explicitly, never override their choice -- still
+    # query Jev when available so the register is judged rather than guessed.
+    if judge is not None and getattr(judge, "available", False):
+        if level is None:
+            progress.step("Placing the lesson on the CEFR scale", done=done_units + 1, total=total_units)
         try:
             verdict = judge.rate_difficulty(title=title, sample=whole, spanish_ratio=measured)
-            if verdict.ok and verdict.probabilities:
+            if level is None and verdict.ok and verdict.probabilities:
                 best = max(verdict.probabilities, key=lambda k: verdict.probabilities[k])
                 level = (verdict.labels.get(str(best)) or "").split(" - ")[0].strip() or None
-            # The register comes from the same call as the level: one state,
-            # two typed questions, no extra round trip.
             judged = (verdict.choice_of("register") or "").strip().lower()
             register = judged if judged in registers.CODES else None
-        except Exception as exc:  # a missing level must not fail an import
+        except Exception as exc:  # a missing level/register must not fail an import
             notes.append(f"level estimate failed: {type(exc).__name__}")
 
     # The slug's digest identifies the source: the URL for a fetch, the text for a
@@ -1194,7 +1455,7 @@ def import_article(
     progress.step("Checking the lesson reads correctly", done=total_units, total=total_units)
     # Read back what was written, with the same parser the corpus uses. If it
     # does not survive that round trip, the user should hear about it now.
-    article = parse_article(markdown, fallback_slug=slug)
+    article = parse_article(markdown, fallback_slug=slug, pair=pair)
     if article is None:
         path.unlink(missing_ok=True)
         raise ImportError_("the generated lesson did not parse back cleanly; nothing was saved")
@@ -1226,4 +1487,5 @@ def import_article(
         },
         "level_estimated": requested_level.code == "auto",
         "reused": reused,
+        "usage": usage.to_dict(),
     }

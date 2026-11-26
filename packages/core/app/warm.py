@@ -27,38 +27,28 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from .diglot import Article, _WORD_RE
+from .diglot import Article
 from .glossary import Glossary
-from .vocab import content_word, fold
+from .languages import DEFAULT_PAIR, LanguagePair, get_pair_or_default
 
 log = logging.getLogger("diglot.warm")
 
-# How many words to warm per article. Enough to cover what a reader clicks in
-# the first few minutes of a new text; more than that spends model calls on
-# words nobody was going to ask about.
-MAX_WORDS = 24
+MAX_WORDS = 12
+WORKERS = 1
 
-# Why this many: the point is to be invisible. A pool large enough to matter and
-# small enough never to compete with a real import for the endpoint.
-WORKERS = 2
-
-# Words this common are either known or glossed in the article already.
-_SKIP = frozenset(
-    """de la el los las un una unos unas que y e o u en por para con sin sobre
-    entre al del a se le les lo su sus mi tu es son era eran fue fueron ser
-    estar está están ni no sí si te os nos me más menos muy ya tan todo toda
-    todos todas mas esta este esto""".split()
-)
+# Auto-folded function words from the default target language profile.
+_SKIP = DEFAULT_PAIR.target.folded_function_words
 
 
 class GlossWarmer:
     """Fills the lookup cache ahead of the reader, without being asked."""
 
-    def __init__(self, client: Any, *, workers: int = WORKERS, max_words: int = MAX_WORDS) -> None:
-        self._client = client
+    def __init__(self, client: Any = None, *, workers: int = WORKERS, max_words: int = MAX_WORDS) -> None:
+        del client  # kept in signature for backwards compatibility; no strong ref retained
         self._max_words = max_words
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gloss-warm")
         self._lock = threading.Lock()
+        self._stopped = False
         self._inflight: set[tuple[str, str]] = set()
         self._done: set[tuple[str, str]] = set()
         self.warmed = 0
@@ -67,28 +57,22 @@ class GlossWarmer:
     # -- picking what to warm --------------------------------------------- #
 
     @staticmethod
-    def candidates(article: Article, glossary: Glossary, *, limit: int = MAX_WORDS) -> list[str]:
-        """The words worth resolving before anyone clicks them, best first.
-
-        Two tiers. **Focus phrases first**: the article bolds exactly what it
-        means to teach, and a learner who does not know what a bolded phrase
-        means is the one most likely to click it. That matters because plenty of
-        them carry no inline gloss -- ``**pintan**`` appears bare, and the
-        post-reading vocabulary box does not always cover it, so nothing else
-        would ever resolve it.
-
-        Then **frequency**: a word the text uses eight times is eight chances to
-        be clicked, and a word used once may never be.
-        """
+    def candidates(article: Article, glossary: Glossary, *, limit: int = MAX_WORDS,
+                   pair: LanguagePair | None = None) -> list[str]:
+        """The words worth resolving before anyone clicks them, best first."""
+        resolved = pair or get_pair_or_default(getattr(article, "language_pair", None))
+        target = resolved.target
+        target_code = getattr(article, "target_lang", target.code)
+        skip = target.folded_function_words
         chosen: list[str] = []
         seen: set[str] = set()
 
-        for pair in article.focus_pairs():
-            if pair.en:
+        for item in article.focus_pairs():
+            if item.en:
                 continue                       # the article already glossed it
-            head = content_word(pair.es) or pair.es
-            folded = fold(head)
-            if len(folded) < 3 or folded in seen or glossary.lookup(pair.es) is not None:
+            head = target.content_word(item.es) or item.es
+            folded = target.fold(head)
+            if len(folded) < target.min_word_length or folded in seen or glossary.lookup(item.es, pair=resolved) is not None:
                 continue
             seen.add(folded)
             chosen.append(head)
@@ -96,20 +80,21 @@ class GlossWarmer:
                 return chosen
 
         counts: Counter[str] = Counter()
+        min_len = max(target.min_source_length, target.min_word_length)
         for block in article.blocks:
             if block.kind not in ("p", "h"):
                 continue
             for span in block.spans:
-                if span.lang != "es":
+                if span.lang != target_code:
                     continue
-                for word in _WORD_RE.findall(span.text):
-                    folded = fold(word)
-                    if len(folded) < 4 or folded in _SKIP or folded in seen:
+                for word in target.tokenize(span.text):
+                    folded = target.fold(word)
+                    if len(folded) < min_len or folded in skip or folded in seen:
                         continue
                     counts[word] += 1
 
         for word, _ in counts.most_common():
-            if glossary.lookup(word) is not None:
+            if glossary.lookup(word, pair=resolved) is not None:
                 continue          # already answerable offline
             chosen.append(word)
             if len(chosen) >= limit:
@@ -120,35 +105,50 @@ class GlossWarmer:
 
     def warm(self, article: Article, glossary: Glossary, lookup: Callable[[str, str], Any]) -> int:
         """Queue this article's unknown words. Returns how many were queued."""
+        resolved = get_pair_or_default(getattr(article, "language_pair", None))
         queued = 0
-        for word in self.candidates(article, glossary, limit=self._max_words):
-            key = (article.slug, fold(word))
+        for word in self.candidates(article, glossary, limit=self._max_words, pair=resolved):
+            key = (article.slug, resolved.target.fold(word))
             with self._lock:
-                if key in self._inflight or key in self._done:
+                if self._stopped or key in self._inflight or key in self._done:
                     continue
                 self._inflight.add(key)
-            queued += 1
-            self._pool.submit(self._one, key, word, article, lookup)
+            try:
+                self._pool.submit(self._one, key, word, article, lookup)
+                queued += 1
+            except RuntimeError:
+                with self._lock:
+                    self._inflight.discard(key)
+                break
         return queued
 
     def _one(self, key: tuple[str, str], word: str, article: Article,
              lookup: Callable[[str, str], Any]) -> None:
+        succeeded = False
         try:
-            lookup(word, article.slug)
-            self.warmed += 1
+            result = lookup(word, article.slug)
+            if isinstance(result, dict) and result.get("error"):
+                log.debug("warming %r returned error: %s", word, result.get("error"))
+            else:
+                succeeded = True
         except Exception as exc:  # best-effort by design
-            self.failed += 1
             log.debug("warming %r failed: %s", word, exc)
         finally:
             with self._lock:
+                if succeeded:
+                    self.warmed += 1
+                    self._done.add(key)
+                else:
+                    self.failed += 1
                 self._inflight.discard(key)
-                self._done.add(key)
 
     def stats(self) -> dict[str, int]:
         with self._lock:
             return {"warmed": self.warmed, "failed": self.failed, "pending": len(self._inflight)}
 
     def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 

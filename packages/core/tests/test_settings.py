@@ -34,7 +34,18 @@ def a_settings(tmp_path, **env) -> Settings:
     ``os.environ`` and only then overlays the file. They start empty so the machine
     running the tests cannot decide what they are testing.
     """
-    values = {"llm_base_url": "", "llm_api_key": "", "llm_model": "", "typesafe_api_key": ""}
+    values = {
+        "llm_base_url": "",
+        "llm_api_key": "",
+        "llm_model": "",
+        "lookup_llm_base_url": "",
+        "lookup_llm_api_key": "",
+        "lookup_llm_model": "",
+        "weave_llm_base_url": "",
+        "weave_llm_api_key": "",
+        "weave_llm_model": "",
+        "typesafe_api_key": "",
+    }
     values.update(env)
     return Settings(data_dir=tmp_path / "data", **values)
 
@@ -119,3 +130,124 @@ def test_nothing_is_reported_as_ready_until_all_three_are_there(tmp_path):
     assert not settings.llm_ready, "a base URL with no key and no model is not ready"
     settings.update_saved({"llm_api_key": SECRET, "llm_model": "a-model"})
     assert settings.llm_ready
+
+
+def test_task_roles_inherit_default_until_overridden(tmp_path):
+    settings = a_settings(
+        tmp_path,
+        llm_base_url="https://api.example.com/v1",
+        llm_api_key=SECRET,
+        llm_model="big-model",
+    )
+    lookup = settings.resolve_llm("lookup")
+    weave = settings.resolve_llm("weave")
+    assert lookup.inherited and lookup.ready and lookup.model == "big-model"
+    assert weave.inherited and weave.ready and weave.model == "big-model"
+
+    # Model-only override shares default base_url and api_key.
+    settings.update_saved({"lookup_llm_model": "fast-model"})
+    lookup = settings.resolve_llm("lookup")
+    assert not lookup.inherited and lookup.ready
+    assert lookup.base_url == "https://api.example.com/v1"
+    assert lookup.api_key == SECRET
+    assert lookup.model == "fast-model"
+
+
+def test_local_lookup_override_does_not_leak_cloud_key_and_needs_no_key(tmp_path):
+    settings = a_settings(
+        tmp_path,
+        llm_base_url="https://api.example.com/v1",
+        llm_api_key=SECRET,
+        llm_model="cloud-big",
+    )
+    settings.update_saved({
+        "lookup_llm_base_url": "http://localhost:11434/v1/",
+        "lookup_llm_model": "qwen3:4b",
+    })
+    lookup = settings.resolve_llm("lookup")
+    assert not lookup.inherited
+    assert lookup.local
+    assert lookup.ready
+    assert lookup.base_url == "http://localhost:11434/v1"
+    assert lookup.api_key == "", "default cloud API key must never leak to a different host"
+
+    # Non-secret serialization never discloses any key.
+    dumped = json.dumps({
+        "llm": settings.role_settings("default"),
+        "lookup_llm": settings.role_settings("lookup"),
+        "weave_llm": settings.role_settings("weave"),
+        "describe": settings.describe(),
+    })
+    assert SECRET not in dumped
+
+
+def test_runtime_routes_lookup_and_weave_to_separate_clients(tmp_path, monkeypatch):
+    from app.llm import LLMClient
+    from app.runtime import App
+
+    settings = a_settings(
+        tmp_path,
+        llm_base_url="https://api.default.example/v1",
+        llm_api_key="sk-default-1234567890",
+        llm_model="default-model",
+    )
+    settings.update_saved({
+        "lookup_llm_base_url": "http://127.0.0.1:11434/v1",
+        "lookup_llm_model": "local-small",
+        "weave_llm_base_url": "https://api.weave.example/v1",
+        "weave_llm_api_key": "sk-weave-1234567890",
+        "weave_llm_model": "cloud-large",
+    })
+
+    app = App(settings)
+    try:
+        assert app.tutor is not None and app.tutor.client.model == "default-model"
+        assert app.lookup_tutor is not None
+        assert app.lookup_tutor.client.base_url == "http://127.0.0.1:11434/v1"
+        assert app.lookup_tutor.client.model == "local-small"
+        assert app.lookup_tutor.client.api_key == ""
+        assert app.weave_tutor is not None
+        assert app.weave_tutor.client.base_url == "https://api.weave.example/v1"
+        assert app.weave_tutor.client.model == "cloud-large"
+
+        # Verify resolve_word uses lookup_tutor, not default or weave tutor.
+        seen_models: list[str] = []
+
+        def fake_complete_json(self, prompt, **kwargs):
+            seen_models.append(self.model)
+            return ({"lemma": "gato", "display": "gato", "pos": "noun", "gloss": "cat"}, None)
+
+        monkeypatch.setattr(LLMClient, "complete_json", fake_complete_json)
+        res = app.resolve_word("gato", "El gato duerme.", None)
+        assert res["gloss"] == "cat"
+        assert seen_models == ["local-small"]
+
+        # Clearing lookup override restores inheritance from default tutor.
+        settings.update_saved({"lookup_llm_base_url": "", "lookup_llm_model": "", "lookup_llm_api_key": ""})
+        app.reload_models()
+        assert app.lookup_tutor is app.tutor
+    finally:
+        app.jobs.stop()
+        app.store.close()
+
+
+def test_local_llm_client_omits_authorization_header_when_key_empty(monkeypatch):
+    import io
+    from app.llm import LLMClient
+
+    captured_headers: dict[str, str] = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured_headers.update(dict(request.header_items()))
+        payload = {
+            "model": "qwen3:4b",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        }
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr("app.llm.urllib.request.urlopen", fake_urlopen)
+    client = LLMClient("http://localhost:11434/v1", "", "qwen3:4b", max_attempts=1)
+    result = client.complete("hi")
+    assert result.text == "ok"
+    assert "Authorization" not in captured_headers

@@ -19,12 +19,17 @@ debugging round:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+
+from .config import is_local_base_url
+
+log = logging.getLogger("diglot.llm")
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -32,15 +37,26 @@ _UA = (
 )
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
+_THINK_UNCLOSED = re.compile(r"<think>.*$", re.S | re.I)
 
-# Ceiling for automatic budget escalation. Above this a single attempt usually
-# either answers or is genuinely stuck. Set from measurement: weaving a passage
-# into Spanish is a long generation, and the model spends *more* on hidden
-# reasoning than on the answer -- one observed failure burned 16,000 reasoning
-# tokens and emitted nothing at all with finish_reason="length".
-_MAX_BUDGET = 32_000
+
+def _strip_thinking(text: str) -> str:
+    """Remove inline ``<think>...</think>`` traces emitted by local reasoning models."""
+    if not text or "<think" not in text.lower():
+        return text
+    cleaned = _THINK_BLOCK.sub("", text)
+    if "<think" in cleaned.lower():
+        cleaned = _THINK_UNCLOSED.sub("", cleaned)
+    return cleaned.strip()
+
+# Ceiling for automatic budget escalation. Reasoning models can spend 8k-16k
+# hidden thinking tokens on a long weave; providers with lower 8k caps still
+# auto-step down cleanly via the HTTP 400 fallback handler.
+_MAX_BUDGET = 24_000
 
 _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529}
+_MAX_TOKENS_CAP_RE = re.compile(r"(?:max_tokens|maximum|limit|<=|at most)[^0-9]{0,24}(\d{3,6})", re.I)
 
 # Seconds to wait before each retry. Roughly exponential, and long enough to
 # outlast a transient DNS or connection failure rather than walking straight
@@ -75,6 +91,92 @@ def _content_text(message: dict[str, Any]) -> str:
 class LLMError(RuntimeError):
     """The model could not be reached, or returned something unusable."""
 
+    def __init__(self, message: str, *, status_code: int | None = None, fatal: bool = False) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.fatal = fatal
+
+
+def _read_completion_response(
+    response: Any, *, cancel_check: Callable[[], None] | None = None
+) -> dict[str, Any]:
+    """Read either a standard JSON response or an OpenAI-compatible SSE stream."""
+    headers = getattr(response, "headers", None)
+    content_type = str(headers.get("Content-Type", "") if headers else "").lower()
+    if "text/event-stream" not in content_type:
+        raw = response.read()
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", "replace")
+        else:
+            text = str(raw)
+        stripped = text.lstrip()
+        if not stripped.startswith("data:"):
+            return json.loads(stripped)
+        lines = text.splitlines()
+    else:
+        lines = None
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish_reason = ""
+    model_name = ""
+    usage: dict[str, Any] = {}
+
+    def consume_line(raw_line: Any) -> bool:
+        nonlocal finish_reason, model_name, usage
+        if cancel_check is not None:
+            cancel_check()
+        line = (raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else str(raw_line)).strip()
+        if not line or line.startswith(":"):
+            return False
+        if not line.startswith("data:"):
+            return False
+        data_str = line[5:].strip()
+        if data_str == "[DONE]":
+            return True
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(chunk, dict):
+            return False
+        if chunk.get("model"):
+            model_name = str(chunk["model"])
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            c0 = choices[0]
+            if c0.get("finish_reason"):
+                finish_reason = str(c0["finish_reason"])
+            delta = c0.get("delta") or c0.get("message") or {}
+            if isinstance(delta, dict):
+                piece = _content_text(delta) if isinstance(delta.get("content"), list) else delta.get("content")
+                if isinstance(piece, str) and piece:
+                    content_parts.append(piece)
+                rc = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(rc, str) and rc:
+                    reasoning_parts.append(rc)
+        return False
+
+    if lines is not None:
+        for line in lines:
+            if consume_line(line):
+                break
+    else:
+        for raw_line in response:
+            if consume_line(raw_line):
+                break
+
+    message: dict[str, Any] = {"content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    return {
+        "model": model_name,
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
 
 @dataclass
 class LLMResult:
@@ -84,6 +186,7 @@ class LLMResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     reasoning_tokens: int = 0
+    cached_tokens: int = 0
     attempts: int = 1
     finish_reason: str = ""
 
@@ -94,6 +197,7 @@ class LLMResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "reasoning_tokens": self.reasoning_tokens,
+            "cached_tokens": self.cached_tokens,
             "attempts": self.attempts,
         }
 
@@ -111,19 +215,25 @@ class LLMClient:
         max_attempts: int = 3,
         effort: str = "low",
     ) -> None:
-        if not (base_url and api_key and model):
+        if not (base_url and model) or (not api_key and not is_local_base_url(base_url)):
             raise LLMError(
                 "LLM_BASE_URL, LLM_API_KEY and LLM_MODEL must all be set "
-                "(D:/aislop/.env or this project's .env)."
+                "(in the Settings panel or .env; API key is optional for localhost)."
             )
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        self.api_key = api_key or ""
         self.model = model
+        self.is_local = is_local_base_url(self.base_url)
         self.timeout = timeout
         self.max_attempts = max_attempts
         # The tutor's jobs are extraction and short generation, not puzzle
         # solving; "low" keeps them fast. Raised per-call for the harder ones.
         self.effort = effort
+        self._supports_effort = True
+        self._supports_json_mode = True
+        self._supports_stream_options = True
+        self._is_reasoning_model = False
+        self._max_tokens_cap: int | None = None
 
     def complete(
         self,
@@ -136,15 +246,10 @@ class LLMClient:
         effort: str | None = None,
         timeout: int | None = None,
         attempts: int | None = None,
+        stream: bool = False,
+        cancel_check: Callable[[], None] | None = None,
     ) -> LLMResult:
-        """Run one completion.
-
-        ``timeout`` and ``attempts`` are per-call on purpose. A word gloss is an
-        interactive request -- the reader is waiting on it -- and a weave is a
-        batch job nobody is watching. Sharing one 180-second timeout across both
-        meant a stalled endpoint could block a click for three attempts, nine
-        minutes, on a word the app was only going to show one line of text for.
-        """
+        """Run one completion, with SSE streaming, 400 parameter fallback, and retries."""
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -156,25 +261,45 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if json_mode:
+        if json_mode and self._supports_json_mode:
             payload["response_format"] = {"type": "json_object"}
-        if effort or self.effort:
-            payload["reasoning_effort"] = effort or self.effort
+        chosen_effort = effort if effort is not None else ("" if self.is_local else self.effort)
+        if chosen_effort and chosen_effort != "none" and self._supports_effort:
+            payload["reasoning_effort"] = chosen_effort
+        if stream:
+            payload["stream"] = True
+            if self._supports_stream_options:
+                payload["stream_options"] = {"include_usage": True}
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
             "User-Agent": _UA,
-            "Accept": "application/json",
+            "Accept": "text/event-stream, application/json" if stream else "application/json",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
-        budget = max_tokens
+        max_cap = self._max_tokens_cap or _MAX_BUDGET
+        initial_budget = max_tokens
+        if self._is_reasoning_model:
+            floor = 2400 if (timeout is not None and timeout <= 60) else 12000
+            initial_budget = min(max_cap, max(max_tokens * 2, floor))
+        budget = min(initial_budget, max_cap)
         last_error: Exception | None = None
+        last_status: int | None = None
+        last_fatal = False
         total_attempts = attempts or self.max_attempts
-        attempts = 0
+        attempts_made = 0
+        budget_escalations = 0
+        param_adjustments = 0
+        max_escalations = 1 if (timeout is not None and timeout <= 60) else 2
 
-        for attempt in range(1, total_attempts + 1):
-            attempts = attempt
+        attempt = 0
+        while attempt < total_attempts:
+            if cancel_check is not None:
+                cancel_check()
+            attempt += 1
+            attempts_made += 1
             body = json.dumps({**payload, "max_tokens": budget}).encode()
             started = time.perf_counter()
             try:
@@ -185,34 +310,54 @@ class LLMClient:
                     method="POST",
                 )
                 with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                    data = json.load(response)
+                    data = _read_completion_response(response, cancel_check=cancel_check)
                 latency_ms = int((time.perf_counter() - started) * 1000)
 
                 choice = data["choices"][0]
                 message = choice.get("message") or {}
                 finish = choice.get("finish_reason") or ""
-                content = _content_text(message)
-                if not content and message.get("reasoning_content"):
-                    content = str(message["reasoning_content"]).strip()
+                raw_content = _content_text(message)
+                had_inline_think = "<think" in raw_content.lower()
+                content = _strip_thinking(raw_content)
+                has_reasoning = bool(message.get("reasoning_content")) or had_inline_think
 
                 usage = data.get("usage") or {}
                 details = usage.get("completion_tokens_details") or {}
                 reasoning = int(details.get("reasoning_tokens") or 0)
+                if reasoning > 0 or has_reasoning:
+                    self._is_reasoning_model = True
+                prompt_details = usage.get("prompt_tokens_details") or {}
+                cached_tokens = int(
+                    prompt_details.get("cached_tokens")
+                    or usage.get("prompt_cache_hit_tokens")
+                    or 0
+                )
 
-                if not content and budget < _MAX_BUDGET and (finish == "length" or reasoning > 0):
-                    budget = min(max(budget * 3, 2000), _MAX_BUDGET)
+                max_cap = self._max_tokens_cap or _MAX_BUDGET
+                if (
+                    not content
+                    and budget < max_cap
+                    and budget_escalations < max_escalations
+                    and (finish == "length" or reasoning > 0 or has_reasoning)
+                ):
+                    budget = min(max(budget * 3, 2000), max_cap)
+                    budget_escalations += 1
+                    attempt -= 1  # budget escalation does not consume a network retry
+                    log.warning(
+                        "LLM %s returned empty content after reasoning (finish=%r, reasoning=%d); escalating max_tokens to %d",
+                        self.model, finish, reasoning, budget,
+                    )
                     last_error = LLMError(
                         f"empty content after {reasoning} reasoning tokens; retrying at budget {budget}"
                     )
                     continue
 
                 if not content:
-                    # Empty with no explanation is the failure that costs the
-                    # most time to diagnose later, so record what came back.
                     last_error = LLMError(
                         f"model returned no content (finish_reason={finish!r}, "
                         f"reasoning_tokens={reasoning}, keys={sorted(message)})"
                     )
+                    log.warning("LLM %s attempt %d/%d: %s", self.model, attempt, total_attempts, last_error)
                     if attempt < total_attempts:
                         time.sleep(0.8 * attempt)
                         continue
@@ -225,25 +370,72 @@ class LLMClient:
                     prompt_tokens=int(usage.get("prompt_tokens") or 0),
                     completion_tokens=int(usage.get("completion_tokens") or 0),
                     reasoning_tokens=reasoning,
-                    attempts=attempts,
+                    cached_tokens=cached_tokens,
+                    attempts=attempts_made,
                     finish_reason=finish,
                 )
             except urllib.error.HTTPError as exc:
                 detail = exc.read()[:300].decode("utf-8", "replace")
-                last_error = LLMError(f"HTTP {exc.code}: {detail}")
+                low = detail.lower()
+                # Auto-adapt on HTTP 400/422 caused by optional params or output caps.
+                if exc.code in (400, 422) and param_adjustments < 3:
+                    adjusted = False
+                    if "reasoning_effort" in payload and ("reasoning" in low or "effort" in low or "unknown" in low or "unrecognized" in low):
+                        payload.pop("reasoning_effort", None)
+                        self._supports_effort = False
+                        adjusted = True
+                        log.warning("LLM %s rejected reasoning_effort (HTTP %d); retrying without it", self.model, exc.code)
+                    elif "response_format" in payload and ("response_format" in low or "json_object" in low):
+                        payload.pop("response_format", None)
+                        self._supports_json_mode = False
+                        adjusted = True
+                        log.warning("LLM %s rejected response_format (HTTP %d); retrying without it", self.model, exc.code)
+                    elif "max_tokens" in low and budget > 2048:
+                        m = _MAX_TOKENS_CAP_RE.search(detail)
+                        parsed_cap = int(m.group(1)) if m else 0
+                        new_cap = parsed_cap if 1024 <= parsed_cap < budget else (8192 if budget > 8192 else 4096)
+                        self._max_tokens_cap = new_cap
+                        budget = min(budget, new_cap)
+                        adjusted = True
+                        log.warning("LLM %s rejected max_tokens (HTTP %d); capping to %d", self.model, exc.code, budget)
+                    elif "stream_options" in payload and ("stream_options" in low or "include_usage" in low):
+                        payload.pop("stream_options", None)
+                        self._supports_stream_options = False
+                        adjusted = True
+                        log.warning("LLM %s rejected stream_options (HTTP %d); retrying without it", self.model, exc.code)
+                    elif payload.get("stream") and "stream" in low:
+                        payload.pop("stream", None)
+                        payload.pop("stream_options", None)
+                        headers["Accept"] = "application/json"
+                        adjusted = True
+                        log.warning("LLM %s rejected stream=true (HTTP %d); retrying non-streaming", self.model, exc.code)
+                    if adjusted:
+                        param_adjustments += 1
+                        attempt -= 1
+                        continue
+
+                last_status = exc.code
+                last_fatal = exc.code in (400, 401, 403, 404, 422)
+                last_error = LLMError(f"HTTP {exc.code}: {detail}", status_code=exc.code, fatal=last_fatal)
+                log.warning("LLM %s HTTP %d: %s", self.model, exc.code, detail)
                 if exc.code not in _RETRYABLE:
                     break
-            except Exception as exc:  # network, timeout, malformed JSON
+            except LLMError:
+                raise
+            except Exception as exc:  # network, timeout, malformed JSON, cancellation
+                if type(exc).__name__ == "JobCancelled":
+                    raise
                 last_error = exc
+                log.warning("LLM %s attempt %d/%d error: %s: %s", self.model, attempt, total_attempts, type(exc).__name__, exc)
 
             if attempt < total_attempts:
-                # Back off generously. A weave is minutes of work and the
-                # failures worth riding out are transient: a DNS blip mid-import
-                # costs one retry here and the whole article if it is not
-                # retried. 0.8s was too short to survive one.
                 time.sleep(_BACKOFF_SECONDS[min(attempt - 1, len(_BACKOFF_SECONDS) - 1)])
 
-        raise LLMError(f"LLM call failed after {attempts} attempt(s): {last_error}")
+        raise LLMError(
+            f"LLM call failed after {attempts_made} attempt(s): {last_error}",
+            status_code=last_status,
+            fatal=last_fatal,
+        )
 
     def complete_json(
         self,

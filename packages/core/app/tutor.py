@@ -18,29 +18,42 @@ import logging
 from typing import Any
 
 from .diglot import Article
+from .languages import DEFAULT_PAIR, DEFAULT_PAIR_ID, LanguagePair
 from .llm import LLMClient, LLMError
 from .writing import BY_MODE, MODES, keep_notes
 
 log = logging.getLogger("diglot.tutor")
 
-SYSTEM = (
-    "You are the tutor inside a diglot reader: an app where an English speaker "
-    "learns Spanish by reading articles that weave Spanish into English prose. "
-    "You are precise, you never pad, and you always answer in the JSON shape "
-    "you are asked for. Glosses and explanations are in English; target-language "
-    "material stays in Spanish."
-)
+SYSTEM = DEFAULT_PAIR.system_prompt()
 
 # Timeouts by whether a human is waiting on the answer.
 #
-# A word gloss is interactive: the reader has clicked and is looking at a
-# spinner, so it gets a short leash and fails fast to "the tutor could not be
-# reached" rather than grinding through three long attempts. Exercises are
-# asked for explicitly and can take a while. The weave runs in a background job
-# nobody is watching, so it keeps the client default.
-GLOSS_TIMEOUT = 20
+# A word gloss is interactive: cloud endpoints fail fast at 25s, while local
+# endpoints (Ollama / LM Studio / llama.cpp) get 60s to cover cold VRAM load
+# and single-slot queuing without premature cancellation.
+GLOSS_TIMEOUT = 25
+LOCAL_GLOSS_TIMEOUT = 60
 EXPLAIN_TIMEOUT = 60
 BATCH_TIMEOUT = 150
+
+# Static system prompt for word lookups so every click shares an identical
+# prefix for provider Prompt Caching and local KV prefix caching.
+_GLOSS_SYSTEM_TEMPLATE = """{system}
+
+You act as an inline dictionary for a reader who clicked a {target_name} word or phrase.
+Always respond with a single compact JSON object containing exactly these keys:
+{{
+  "lemma": "dictionary form (infinitive for verbs, singular masculine for nouns/adjectives)",
+  "display": "the form as it appears in the sentence",
+  "pos": "one of: noun, verb, adjective, adverb, pronoun, preposition, conjunction, phrase, interjection",
+  "gloss": "short {base_name} translation, 1-4 words",
+  "sense": "which sense this is in {base_name}, at most 12 words",
+  "note": "1-2 short {base_name} sentences on form/usage/pitfalls, or empty string",
+  "example": "one short different {target_name} sentence using the same sense",
+  "example_en": "its {base_name} translation",
+  "related": ["up to 3 useful related forms, e.g. infinitive or key conjugations"]
+}}
+Keep every field concise and accurate. Output JSON only."""
 
 # Prompt identity, for cache keys.
 #
@@ -59,17 +72,21 @@ PROMPT_VERSION = {
     "feedback": 1,
     "writing": 2,      # 2: notes placed on the draft, not only a block of feedback
     "suggest": 1,
+    "focus": 1,
     # Woven passages are cached so a retry or a restart does not redo work that
     # already succeeded -- a twelve-chunk weave is ten minutes.
-    "weave": 3,        # 3: distribution rule no longer contradicts the density note
+    "weave": 4,        # 4: model-scoped cache key, best-of-N, gloss-stripped length check
     "anchors": 1,
     # The reader's own writing, into English, before it can be woven.
     "english": 1,
 }
 
 
-def cache_key(feature: str, *parts: str) -> str:
-    """A cache key that changes when the prompt behind it changes."""
+def cache_key(feature: str, *parts: str, pair: str | LanguagePair | None = None) -> str:
+    """A cache key that changes when the prompt (or non-default language pair) changes."""
+    pair_id = pair.id if isinstance(pair, LanguagePair) else (pair or DEFAULT_PAIR_ID)
+    if pair_id and pair_id != DEFAULT_PAIR_ID:
+        return ":".join([feature, f"v{PROMPT_VERSION.get(feature, 1)}", pair_id, *parts])
     return ":".join([feature, f"v{PROMPT_VERSION.get(feature, 1)}", *parts])
 
 
@@ -118,38 +135,37 @@ def _trim_answer(text: str, *, max_words: int = 130) -> str:
 
 
 class Tutor:
-    def __init__(self, client: LLMClient) -> None:
+    def __init__(self, client: LLMClient, *, pair: LanguagePair | None = None) -> None:
         self.client = client
+        self.pair = pair or DEFAULT_PAIR
 
     # -- word lookup ------------------------------------------------------ #
 
     def gloss_word(self, *, word: str, sentence: str, article_title: str) -> dict[str, Any]:
         """The dictionary entry behind a click in the reader.
 
-        Consulting the model per word is more expensive than shipping a
-        dictionary, and much better: it can say that *se volverá* is
-        ``volverse`` in the future tense rather than treating it as an unknown
-        token, and it can explain the word *as used in this sentence*.
+        Uses a static system prompt with the full schema so repeated clicks hit
+        KV / Prompt Prefix Caches, and adapts timeout/retries for local models.
         """
-        prompt = f"""A learner clicked the Spanish word or phrase "{word}" while reading "{article_title}".
-
-The sentence it appeared in:
-{sentence}
-
-Return JSON with exactly these keys:
-{{
-  "lemma": "the dictionary form (infinitive for verbs, singular masculine for nouns/adjectives)",
-  "display": "the form as it appears in the sentence",
-  "pos": "part of speech, one of: noun, verb, adjective, adverb, pronoun, preposition, conjunction, phrase, interjection",
-  "gloss": "a short English translation, 1-4 words",
-  "sense": "which sense of the word this is, in English, at most 12 words",
-  "note": "one or two sentences of English explanation aimed at a learner: why it takes this form here, what to watch out for. Empty string if there is nothing worth saying.",
-  "example": "a short, different Spanish sentence using the same word in the same sense",
-  "example_en": "its English translation",
-  "related": ["up to 3 other forms of the same word worth knowing, e.g. infinitive or key conjugations"]
-}}"""
-        data, _ = self.client.complete_json(prompt, system=SYSTEM, max_tokens=900,
-                                           timeout=GLOSS_TIMEOUT, attempts=2)
+        pair = self.pair
+        system = _GLOSS_SYSTEM_TEMPLATE.format(
+            system=pair.system_prompt(),
+            target_name=pair.target.name,
+            base_name=pair.base.name,
+        )
+        title_line = f'Article: "{article_title}"\n' if article_title else ""
+        prompt = f'{title_line}Word: "{word}"\nSentence: {sentence}'
+        is_local = bool(getattr(self.client, "is_local", False))
+        timeout = LOCAL_GLOSS_TIMEOUT if is_local else GLOSS_TIMEOUT
+        attempts = 1 if is_local else 2
+        data, _ = self.client.complete_json(
+            prompt,
+            system=system,
+            max_tokens=600,
+            effort="none",
+            timeout=timeout,
+            attempts=attempts,
+        )
         return _as_dict(data)
 
     # -- explanation ------------------------------------------------------ #
@@ -468,7 +484,8 @@ or comment on the piece; return the revision itself and nothing else."""
         prompt = f"""Translate this sentence into {target}. Return only the translation, no commentary.
 
 {sentence}"""
-        result = self.client.complete(prompt, system=SYSTEM, max_tokens=600, temperature=0.0,
+        system = DEFAULT_PAIR.translation_system_prompt(target)
+        result = self.client.complete(prompt, system=system, max_tokens=600, temperature=0.0,
                                      timeout=GLOSS_TIMEOUT, attempts=2)
         return result.text.strip()
 
