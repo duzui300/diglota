@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import gzip
 import html
+import ipaddress
 import json
 import re
+import socket
 import textwrap
 import urllib.error
 import urllib.parse
@@ -38,6 +40,8 @@ USER_AGENT = (
 )
 
 TIMEOUT = 30
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024        # 5 MiB wire cap
+MAX_DECOMPRESSED_BYTES = 20 * 1024 * 1024   # 20 MiB decompression cap
 
 # Elements that never contain article prose.
 _DROP = {"script", "style", "noscript", "svg", "form", "iframe", "nav", "aside",
@@ -66,8 +70,116 @@ class FetchError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
+# Fake-IP ranges used by transparent TUN proxies (Clash / Clash Verge Rev /
+# Mihomo / Sing-box / Surge): public hostnames resolve into these ranges while
+# actual routing happens at the TUN layer. Allowed only for DNS-resolved public
+# hostnames, never for raw IP literals or loopback/RFC1918/metadata ranges.
+_TUN_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("fc00::/18"),
+)
+
+
+def _is_tun_fake_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(ip in net for net in _TUN_FAKE_IP_NETWORKS)
+
+
+def _is_disallowed_ip(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    allow_tun_fake_ip: bool = False,
+) -> bool:
+    if allow_tun_fake_ip and _is_tun_fake_ip(ip):
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_public_url(url: str, *, resolve_dns: bool = True) -> urllib.parse.ParseResult:
+    """Reject non-http(s) schemes and private/loopback/link-local SSRF targets."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise FetchError(f"not a usable URL: {url!r}")
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host in ("localhost", "localhost.localdomain") or host.endswith(".local"):
+        raise FetchError("refusing to fetch a local or private network address")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if _is_disallowed_ip(ip, allow_tun_fake_ip=False):
+            raise FetchError("refusing to fetch a local or private network address")
+        return parsed
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
+                                       type=socket.SOCK_STREAM)
+        except OSError:
+            # Let urllib report DNS failure with its normal error path.
+            return parsed
+        for info in infos:
+            addr = info[4][0]
+            try:
+                resolved_ip = ipaddress.ip_address(addr.split("%", 1)[0])
+            except ValueError:
+                continue
+            if _is_disallowed_ip(resolved_ip, allow_tun_fake_ip=True):
+                raise FetchError("refusing to fetch a local or private network address")
+    return parsed
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, *, resolve_dns: bool = True) -> None:
+        super().__init__()
+        self._resolve_dns = resolve_dns
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_url(newurl, resolve_dns=self._resolve_dns)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _read_bounded(stream: Any, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise FetchError("the page is too large to import")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decompress_bounded(raw: bytes, encoding: str) -> bytes:
+    enc = (encoding or "").lower()
+    if "gzip" in enc:
+        with gzip.GzipFile(fileobj=__import__("io").BytesIO(raw)) as gz:
+            return _read_bounded(gz, MAX_DECOMPRESSED_BYTES)
+    if "deflate" in enc:
+        for wbits in (-zlib.MAX_WBITS, zlib.MAX_WBITS):
+            try:
+                decomp = zlib.decompressobj(wbits)
+                out = decomp.decompress(raw, MAX_DECOMPRESSED_BYTES + 1)
+                if len(out) > MAX_DECOMPRESSED_BYTES:
+                    raise FetchError("the page is too large to import")
+                return out
+            except zlib.error:
+                continue
+        raise FetchError("could not decode compressed response")
+    return raw
+
+
 def _opener(proxy: str | None):
-    handlers: list[Any] = []
+    handlers: list[Any] = [_SafeRedirectHandler(resolve_dns=not bool(proxy))]
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     else:
@@ -75,33 +187,32 @@ def _opener(proxy: str | None):
     return urllib.request.build_opener(*handlers)
 
 
-def fetch_url(url: str, *, proxy: str | None = None, timeout: int = TIMEOUT) -> tuple[str, str]:
-    """GET a URL. Returns ``(html, final_url)``."""
-    if not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    parsed = urllib.parse.urlparse(url)
-    if not parsed.netloc:
-        raise FetchError(f"not a usable URL: {url!r}")
+def fetch_url(url: str, *, proxy: str | None = None, timeout: int = TIMEOUT,
+              accept_language: str = "en-US,en;q=0.9,es;q=0.8") -> tuple[str, str]:
+    """GET a public HTTP(S) URL with SSRF and response-size safeguards."""
+    cleaned = (url or "").strip()
+    if "://" not in cleaned:
+        cleaned = "https://" + cleaned
+    _validate_public_url(cleaned, resolve_dns=not bool(proxy))
 
     request = urllib.request.Request(
-        url,
+        cleaned,
         headers={
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+            "Accept-Language": accept_language,
             "Accept-Encoding": "gzip, deflate",
         },
     )
     try:
         with _opener(proxy).open(request, timeout=timeout) as response:
-            raw = response.read()
+            raw = _read_bounded(response, MAX_RESPONSE_BYTES)
             final = response.geturl()
             encoding = response.headers.get("Content-Encoding", "")
-            if "gzip" in encoding:
-                raw = gzip.decompress(raw)
-            elif "deflate" in encoding:
-                raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+            raw = _decompress_bounded(raw, encoding)
             charset = response.headers.get_content_charset() or "utf-8"
+    except FetchError:
+        raise
     except urllib.error.HTTPError as exc:
         raise FetchError(f"the site returned HTTP {exc.code}") from None
     except urllib.error.URLError as exc:
@@ -703,24 +814,6 @@ def _parse_feed(text: str) -> list[dict[str, str]]:
         if title and link.startswith("http"):
             out.append({"title": _clean_text(title), "url": link, "snippet": _plain(summary)})
     return out
-
-
-def _unwrap_ddg(href: str) -> str:
-    """DuckDuckGo wraps results in ``/l/?uddg=<encoded>`` redirects."""
-    if "duckduckgo.com/l/" in href or href.startswith("//duckduckgo.com/l/"):
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(
-            href if href.startswith("http") else "https:" + href
-        ).query)
-        target = params.get("uddg")
-        if target:
-            return urllib.parse.unquote(target[0])
-    if href.startswith("//"):
-        return "https:" + href
-    return href
-
-
-def _plain(fragment: str) -> str:
-    return _clean_text(html.unescape(_TAGS_RE.sub(" ", fragment)))
 
 
 def _unwrap_ddg(href: str) -> str:

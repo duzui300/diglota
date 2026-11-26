@@ -40,10 +40,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.log:
+        log_path = Path(args.log)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         # Line buffered, and appended: a restart should not erase why the last one
         # failed. Set before uvicorn is configured so its StreamHandler -- which
         # resolves sys.stderr when it is built -- picks this up too.
-        stream = open(args.log, "a", encoding="utf-8", buffering=1)
+        stream = open(log_path, "a", encoding="utf-8", buffering=1)
         sys.stdout = stream
         sys.stderr = stream
 

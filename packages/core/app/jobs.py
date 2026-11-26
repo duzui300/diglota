@@ -126,12 +126,14 @@ class JobContext:
         """Report the current stage. ``done``/``total`` are optional units."""
         if self.cancelled:
             raise JobCancelled("cancelled")
-        self._job.step = name
-        if done is not None:
-            self._job.done = done
-        if total is not None:
-            self._job.total = total
-        self._job.detail = detail
+        with self._manager._lock:
+            self._job.step = name
+            if done is not None:
+                self._job.done = done
+            if total is not None:
+                self._job.total = total
+            self._job.detail = detail
+        self._manager._persist(self._job)
         self._manager.publish(self._job)
 
 
@@ -167,15 +169,20 @@ class JobManager:
         """
         try:
             for record in self._store.list_jobs(limit=HISTORY_LIMIT):
+                created = _parse_ts(record.get("created_at"))
+                finished = _parse_ts(record.get("finished_at"))
                 job = Job(
                     id=record["id"], kind=record["kind"], title=record["title"],
                     status=record["status"], step=record["step"],
                     done=record["done"], total=record["total"], detail=record["detail"],
                     error=record["error"], result=record.get("result"),
+                    created_at=created if created is not None else time.time(),
+                    finished_at=finished,
                 )
                 if job.running:
                     job.status = FAILED
                     job.error = "interrupted: the server restarted while this was running"
+                    job.finished_at = time.time()
                     self._persist(job)
                 self._jobs[job.id] = job
                 self._order.append(job.id)
@@ -234,14 +241,19 @@ class JobManager:
             with self._lock:
                 job = self._jobs.get(job_id)
                 work = self._work.pop(job_id, None)
-            if job is None or work is None:
-                continue
-            if job.cancel.is_set():
+                if job is None or work is None or not job.running:
+                    continue
+                if job.cancel.is_set():
+                    already_cancelled = True
+                else:
+                    already_cancelled = False
+                    job.status = RUNNING
+                    job.step = "starting"
+            if already_cancelled:
                 self._finish(job, CANCELLED, error="cancelled before it started")
                 continue
 
-            job.status = RUNNING
-            job.step = "starting"
+            self._persist(job)
             self.publish(job)
             context = JobContext(job, self)
             try:
@@ -291,16 +303,18 @@ class JobManager:
 
     def cancel(self, job_id: str) -> bool:
         """Ask a job to stop. Returns False if it is not around or already done."""
-        job = self.get(job_id)
-        if job is None or not job.running:
-            return False
-        job.cancel.set()
-        # A queued job has no worker to notice the flag.
-        if job.status == QUEUED:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or not job.running:
+                return False
+            job.cancel.set()
+            was_queued = job.status == QUEUED
+            if not was_queued:
+                job.step = "cancelling"
+                job.detail = "finishing the current step"
+        if was_queued:
             self._finish(job, CANCELLED, error="cancelled before it started")
         else:
-            job.step = "cancelling"
-            job.detail = "finishing the current step"
             self.publish(job)
         return True
 
@@ -340,6 +354,13 @@ class JobManager:
 
     def stop(self) -> None:
         self._stopping = True
+        with self._lock:
+            channels = list(self._subscribers)
+        for channel in channels:
+            try:
+                channel.put_nowait(None)
+            except queue.Full:
+                pass
 
     # -- subscribers ------------------------------------------------------ #
 
@@ -355,15 +376,13 @@ class JobManager:
 
     def publish(self, job: Job) -> None:
         """Tell every listener about a change. Never blocks a worker."""
-        payload = json.dumps({"type": "job", "job": job.to_dict()}, ensure_ascii=False)
         with self._lock:
+            payload = json.dumps({"type": "job", "job": job.to_dict()}, ensure_ascii=False)
             channels = list(self._subscribers)
         for channel in channels:
             try:
                 channel.put_nowait(payload)
             except queue.Full:
-                # A listener that cannot keep up is not worth stalling a job
-                # for; it will resync from the snapshot endpoint.
                 pass
 
     def event_stream(self, heartbeat: float = 15.0) -> Iterable[str]:
@@ -371,11 +390,17 @@ class JobManager:
         channel = self.subscribe()
         try:
             yield f"data: {json.dumps({'type': 'snapshot', 'jobs': self.snapshot()})}\n\n"
-            while True:
+            while not self._stopping:
                 try:
-                    yield f"data: {channel.get(timeout=heartbeat)}\n\n"
+                    msg = channel.get(timeout=heartbeat)
                 except queue.Empty:
+                    if self._stopping:
+                        break
                     yield ": keep-alive\n\n"
+                    continue
+                if msg is None:
+                    break
+                yield f"data: {msg}\n\n"
         finally:
             self.unsubscribe(channel)
 
@@ -386,3 +411,19 @@ def _iso(stamp: float | None) -> str | None:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_ts(value: str | float | int | None) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
