@@ -3,7 +3,7 @@
 
 The app itself is not rebuilt here: ``build.py --installer`` builds the normal
 folder first, adds the uninstaller to it, and zips that folder into
-``build/Diglota-payload.zip``. This spec puts the zip inside a one-file exe next
+``build/payload.zip``. This spec puts the zip inside a one-file exe next
 to the setup program, so the exe people download is a single file.
 
 The setup window is the only thing that needs tkinter; the reader is not in this

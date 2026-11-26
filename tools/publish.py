@@ -102,6 +102,11 @@ def main() -> int:
     args = parser.parse_args()
 
     target: Path = args.target.expanduser().resolve()
+    if target == ROOT.resolve() or ROOT.resolve() in target.parents:
+        raise SystemExit(
+            f"refusing to export into {target}: target cannot be the source repository itself "
+            "(pass --target <separate-dir>)."
+        )
     target.mkdir(parents=True, exist_ok=True)
     fresh = not (target / ".git").is_dir()
     if fresh:

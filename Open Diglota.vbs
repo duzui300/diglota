@@ -1,4 +1,4 @@
-' Open the diglot reader without a console window.
+' Open Diglota without a console window.
 '
 ' Double-click this file. It starts the app with pythonw.exe, which has no console
 ' at all, so nothing flashes up and nothing stays open afterwards; the server's log
@@ -8,7 +8,7 @@
 ' not have the port, and all you wanted was the page.
 '
 ' Run it with a "no-open" argument to start the server without opening a browser:
-'     wscript "Open Diglot.vbs" no-open
+'     wscript "Open Diglota.vbs" no-open
 
 Option Explicit
 
@@ -31,9 +31,9 @@ End If
 
 interpreter = FindInterpreter(root)
 If interpreter = "" Then
-    MsgBox "Python was not found, so the diglot reader cannot be started." & vbCrLf & vbCrLf & _
+    MsgBox "Python was not found, so Diglota cannot be started." & vbCrLf & vbCrLf & _
            "Install Python, or run this from a terminal to see the error:" & vbCrLf & _
-           "    python run.py", 16, "Diglot"
+           "    python run.py", 16, "Diglota"
     WScript.Quit
 End If
 
@@ -60,8 +60,8 @@ Loop
 
 If Not ready Then
     If wantsBrowser Then
-        MsgBox "The reader did not start within 15 seconds." & vbCrLf & vbCrLf & _
-               "What went wrong is written to:" & vbCrLf & logFile, 48, "Diglot"
+        MsgBox "Diglota did not start within 15 seconds." & vbCrLf & vbCrLf & _
+               "What went wrong is written to:" & vbCrLf & logFile, 48, "Diglota"
     End If
     WScript.Quit
 End If

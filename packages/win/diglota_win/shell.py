@@ -36,7 +36,7 @@ MUTEX_NAME = "Local\\Diglota.Desktop"
 DEFAULT_SIZE = (1280, 860)
 SPLASH_SIZE = (720, 520)
 
-PALETTES = {"paper": "#e8ebe0", "sepia": "#e4d6bd", "night": "#151d17"}
+PALETTES = {"paper": "#e9ece0", "sepia": "#e4d6bd", "night": "#151d17"}
 
 log = logging.getLogger("diglot.desktop")
 
@@ -396,13 +396,35 @@ def _single_instance() -> bool:
     return False
 
 
+def _window_process_name(hwnd: int) -> str:
+    """Lowercase executable basename owning ``hwnd``, or empty string."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    pid = ctypes.c_ulong(0)
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        size = ctypes.c_ulong(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return Path(buf.value).name.lower()
+    finally:
+        kernel32.CloseHandle(handle)
+    return ""
+
+
 def _focus_existing() -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.FindWindowW.restype = ctypes.c_void_p
+    expected = Path(sys.executable).name.lower() if getattr(sys, "frozen", False) else ""
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         hwnd = user32.FindWindowW(None, APP_NAME)
-        if hwnd:
+        if hwnd and (not expected or _window_process_name(hwnd) == expected):
             user32.ShowWindow(ctypes.c_void_p(hwnd), 9)       # SW_RESTORE
             user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
             return

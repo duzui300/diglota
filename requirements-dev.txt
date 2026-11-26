@@ -1,8 +1,8 @@
 # What the *tests* need, on top of requirements.txt.
 #
-#     pip install -r requirements-dev.txt
-#     python -m pytest -q                  # 530 unit tests
-#     python tools/ui_test.py              # 275 browser checks
+#     pip install -r requirements.txt -r requirements-dev.txt
+#     python -m pytest -q                  # core + win unit tests
+#     python tools/ui_test.py              # browser checks (requires running server)
 #
 # The app does not import any of this: running it needs requirements.txt and
 # nothing else.

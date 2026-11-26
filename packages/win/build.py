@@ -1,7 +1,7 @@
 """Freeze the desktop app into a folder, and optionally into a Windows installer.
 
     python packages/win/build.py               # packages/win/dist/Diglota/
-    python packages/win/build.py --installer   # ... and Diglota-Setup-1.0.1.exe
+    python packages/win/build.py --installer   # ... and Diglota-Setup-1.1.0.exe
 
 The folder is portable: copy it anywhere, double-click ``Diglota.exe``. The
 reader's own ``data/`` is created beside the executable on first run -- which is

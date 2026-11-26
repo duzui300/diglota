@@ -2075,13 +2075,13 @@ def run(page: Page, *, with_ai: bool) -> None:
     page.wait_for_timeout(800)
     toasts = page.evaluate("() => window.__toasts || []")
     check("a pop-up announced the failure",
-          any("✕" in t for t in toasts), str(toasts[-1:])[:120])
+          any(("Failed." in t or "✕" in t) for t in toasts), str(toasts[-1:])[:120])
 
     page.locator("#btn-activity").click()
     page.wait_for_timeout(400)
     card = page.locator(f'#activity [data-job-id="{job_id}"]')
     check("the failure is listed with its reason",
-          "✕" in card.inner_text() or "could not" in card.inner_text().lower(),
+          "failed" in card.inner_text().lower() or "✕" in card.inner_text() or "could not" in card.inner_text().lower(),
           card.inner_text()[:90])
     card.locator("[data-job-dismiss]").click()
     page.wait_for_timeout(700)

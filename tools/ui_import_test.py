@@ -132,10 +132,12 @@ def run(page: Page, url: str, timeout: float) -> None:
     check("a pop-up announced the result", bool(toast_text), "no toast was raised")
     if toast_text:
         print(f"  toast: {toast_text[:110]!r}")
-    check("the pop-up says which way it went", ("✓" in toast_text) or ("✕" in toast_text),
+    is_done_toast = ("Done." in toast_text) or ("✓" in toast_text)
+    is_fail_toast = ("Failed." in toast_text) or ("✕" in toast_text)
+    check("the pop-up says which way it went", is_done_toast or is_fail_toast,
           toast_text[:80])
     check("the pop-up agrees with the job's outcome",
-          ("✓" in toast_text) == (status == "done"), f"job {status}, toast {toast_text[:50]!r}")
+          is_done_toast == (status == "done"), f"job {status}, toast {toast_text[:50]!r}")
 
     succeeded = status == "done"
     if succeeded:
