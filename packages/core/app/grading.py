@@ -32,18 +32,14 @@ import re
 from typing import Any
 
 from .judge import Judge, Verdict
+from .languages import DEFAULT_PAIR, LanguagePair
 from .vocab import fold, stem
-from .diglot import _WORD_RE
 
 log = logging.getLogger("diglot.grading")
 
 # Folded content words, for the local comparison. Function words carry no
-# meaning to compare and are most of any Spanish sentence.
-_IGNORE = frozenset(
-    """de la el los las un una unos unas que y e o u en por para con sin sobre
-    entre al del a se le les lo su sus mi tu es son era eran fue fueron ser
-    estar está están ni no sí si te os nos me más mas menos muy ya""".split()
-)
+# meaning to compare and are most of any target-language sentence.
+_IGNORE = DEFAULT_PAIR.target.folded_function_words
 
 # How much of the reference a learner's answer has to share before a local
 # comparison will call it correct. Set high on purpose: the fallback should be
@@ -59,35 +55,37 @@ PARTIAL_THRESHOLD = 0.3
 CORRECT_AT = MATCH_THRESHOLD
 
 
-def content_words(text: str) -> set[str]:
+def content_words(text: str, *, pair: LanguagePair | None = None) -> set[str]:
     """Stems of the content words in a passage."""
+    target = (pair or DEFAULT_PAIR).target
     out: set[str] = set()
-    for word in _WORD_RE.findall(text or ""):
-        folded = fold(word)
-        if len(folded) < 3 or folded in _IGNORE:
+    for word in target.tokenize(text or ""):
+        folded = target.fold(word)
+        if len(folded) < target.min_word_length or folded in target.folded_function_words:
             continue
-        out.add(stem(word))
+        out.add(target.stem(word))
     return out
 
 
-def overlap(left: str, right: str) -> float:
+def overlap(left: str, right: str, *, pair: LanguagePair | None = None) -> float:
     """How much of the reference's content the attempt shares.
 
     Normalised by the reference, not the union: an answer that says the same
     thing more briefly is fine, an answer that says half of it is not.
     """
-    wanted = content_words(right)
+    wanted = content_words(right, pair=pair)
     if not wanted:
         return 0.0
-    return len(content_words(left) & wanted) / len(wanted)
+    return len(content_words(left, pair=pair) & wanted) / len(wanted)
 
 
 class Grading:
     """The three tiers, tried in order. Every method returns a Verdict."""
 
-    def __init__(self, judge: Judge, tutor: Any = None) -> None:
+    def __init__(self, judge: Judge, tutor: Any = None, *, pair: LanguagePair | None = None) -> None:
         self.judge = judge
         self.tutor = tutor
+        self.pair = pair or DEFAULT_PAIR
 
     # -- what will answer ------------------------------------------------ #
 
@@ -164,7 +162,7 @@ Numbers are your confidence that the dimension holds."""
         if not isinstance(data, dict):
             return None
         return Verdict(
-            score=_number(data.get("quality")),
+            score=_number(data.get("quality"), hi=4.0),
             checks={
                 "meaning": _number(data.get("meaning")) or 0.0,
                 "grammar": _number(data.get("grammar")) or 0.0,
@@ -325,7 +323,7 @@ pattern repeated, and that it did what the prompt asked."""
         if not isinstance(data, dict):
             return None
         return Verdict(
-            score=_number(data.get("quality")),
+            score=_number(data.get("quality"), hi=4.0),
             checks={
                 "well_formed": _number(data.get("well_formed")) or 0.0,
                 "range": _number(data.get("range")) or 0.0,
@@ -344,9 +342,9 @@ pattern repeated, and that it did what the prompt asked."""
         return verdict
 
 
-def _number(value: Any) -> float | None:
+def _number(value: Any, *, hi: float = 1.0) -> float | None:
     try:
-        return max(0.0, min(1.0, float(value))) if value is not None else None
+        return max(0.0, min(hi, float(value))) if value is not None else None
     except (TypeError, ValueError):
         return None
 

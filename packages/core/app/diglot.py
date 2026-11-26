@@ -34,11 +34,32 @@ stops. See :func:`segment` for how that is decided.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence
+
+from .languages import (
+    DEFAULT_PAIR,
+    DEFAULT_PAIR_ID,
+    EN_ES_PAIR,
+    LanguagePair,
+    fold_text,
+    get_pair_or_default,
+    slugify_text,
+)
+from .languages.en_es import (
+    EN_ES_AMBIGUOUS,
+    EN_HMM_WORDS,
+    EN_SUFFIXES,
+    ES_ACCENTS,
+    ES_HMM_WORDS,
+    ES_PROFILE,
+    ES_SUFFIXES,
+)
+
+log = logging.getLogger("diglot.parser")
 
 # --------------------------------------------------------------------------- #
 # Markdown-level patterns
@@ -72,150 +93,34 @@ _UNIT_SPLIT = re.compile("(\\s+|\x00[BG]\\d+\x00)")
 
 
 # --------------------------------------------------------------------------- #
-# Language identification
+# Language identification (delegated to ``app.languages``; EN-ES kept as default)
 # --------------------------------------------------------------------------- #
 
-# Content words matter as much as function words: a clause built entirely of
-# vocabulary the lexicon has never seen decodes as a coin flip. This list is
-# tuned to the corpus (AI, art, language, philosophy) rather than to Spanish at
-# large, which is why it carries ``lenguaje`` and ``modelo`` but not ``cocina``.
-_ES_WORDS = frozenset(
-    """
-    de la el los las un una unos unas que y e o u en por para con sin sobre entre
-    hasta desde segun según durante mediante se le les lo su sus mi tu es son era
-    eran fue fueron ser estar está están estaba estaban estan han ha he hay había
-    habia puede pueden podía podia tiene tienen tenía tenia hacer hace hacen más
-    mas menos muy también tambien pero sino aunque porque pues como cuando donde
-    quien quienes cual cuales este esta esto estos estas ese esa eso esos esas
-    aquel aquella al del ni ya aún aun todavía todavia siempre nunca ahora antes
-    después despues luego aquí aqui allí alli así asi tan tanto todo toda todos
-    todas otro otra otros otras mismo misma cada algún algun alguna ningún ninguna
-    nada nadie algo alguien tal tales pues sea sean fuera fuese siendo sido esta
-    éste ésta aquello cuyo cuya cuyos cuyas ambos ambas cualquiera quienes quiera
-    debía debia podría podria debería deberia había habia siendo hemos habéis
-    nuestros nuestras vuestro vuestra ellos ellas nosotros vosotros usted ustedes
-    te os nos me les consiste resultan resulta existen existe hace hacía hacia
-    arte artista artistas obra obras mundo humano humanos humanidad vida tiempo
-    años año siglo siglos historia cultura lenguaje lengua lenguas idioma palabra
-    palabras texto textos ideas idea mente cerebro pensamiento conocimiento
-    pregunta respuestas forma formas manera modos modo parte partes cosa cosas
-    caso casos ejemplo ejemplos cambio cambios proceso procesos sistema sistemas
-    modelo modelos datos información tecnologia tecnología maquina máquina
-    máquinas herramientas herramienta trabajo trabajos desarrollo crecimiento
-    futuro pasado presente real realidad verdad sentido significado valor valores
-    poder fuerza razón razon razones efecto efectos causa causas resultado
-    resultados problema problemas solución solucion pregunta tema temas punto
-    puntos lugar lugares grupo grupos sociedad social persona personas gente
-    nombre nombres número numero parte nuevo nueva viejos viejo grandes grande
-    mejor peor mayor menor primero primer último ultimo mismo propio propia
-    posible imposible importante diferentes diferente distintos distinto general
-    común comun simple complejo difícil dificil fácil facil claro oscuro
-    entender comprender aprender aprender enseñar mostrar decir dice dicen habla
-    hablar escribir escribe lee leer pensar piensa creer cree crear crea crear
-    producir generar cambiar cambiar seguir sigue lograr conseguir permitir
-    parecer parece queda quedan tener tiene deben debe puede debemos podemos
-    quieren quiere hacer hacen ver vemos da dan van vamos solo sólo además ademas
-    incluso entonces mientras tanto sin embargo aunque quizá quiza tal vez
-    """.split()
-)
+_ES_WORDS = ES_HMM_WORDS
+_EN_WORDS = EN_HMM_WORDS
+_AMBIGUOUS = EN_ES_AMBIGUOUS | (_ES_WORDS & _EN_WORDS)
+_ACCENTS = set(ES_ACCENTS)
+_ES_SUFFIXES = ES_SUFFIXES
+_EN_SUFFIXES = EN_SUFFIXES
 
-# Words that are strong evidence of English.
-_EN_WORDS = frozenset(
-    """
-    the a an and or but if of to in on at by for with from as is are was were be
-    been being am has have had do does did will would can could shall should may
-    might must this that these those it its he she they them their his her we us
-    our you your i me my not no so than then there here when where which who whom
-    whose what how why all any some more most other such only also very just into
-    over after before between during about up down out off again once because
-    while both each few many much own same too s t don now
-    art artist artists work works world human humans life time year years century
-    history culture language languages word words text texts idea ideas mind brain
-    thought knowledge question questions form forms way ways part parts thing
-    things case cases example examples change changes process processes system
-    systems model models data information technology machine machines tool tools
-    future past present real reality truth meaning value values power reason
-    reasons effect effects cause causes result results problem problems solution
-    theme point points place places group groups society social person people
-    name names number new old great large big better worse greater less first last
-    own possible impossible important different general common simple complex
-    difficult easy clear dark understand learn teach show say says said speak talk
-    write writes read think thinks believe believes create creates produce
-    generate change follow continue achieve get allow seem seems remain stay
-    become becomes need needs want wants see seen make makes made give gives
-    take takes come comes go goes know knows find finds look looks feel feels
-    still even though however perhaps maybe almost often always never sometimes
-    """.split()
-)
-
-# Tokens that are genuinely both (``no``, ``a``, ``me``, ``he``, ``son`` ...).
-# They carry no signal either way and are resolved by their neighbours.
-_AMBIGUOUS = frozenset("no a me he son as has sea da la di mi si an".split())
-
-# A word claimed by both lexicons is by definition no evidence either way --
-# ``real``, ``general`` and ``simple`` are spelled the same in both languages.
-# Derived rather than hand-maintained so the two lists can grow independently.
-_AMBIGUOUS = _AMBIGUOUS | (_ES_WORDS & _EN_WORDS)
-
-_ACCENTS = set("áéíóúüñ¿¡ÁÉÍÓÚÜÑ")
-
-# Spanish orthography is generous with these endings, and English is not.
-_ES_SUFFIXES = ("ción", "ciones", "dad", "dades", "mente", "ísimo", "ísima", "aban", "iesen")
-_EN_SUFFIXES = ("ing", "tion", "sion", "ough")
-
-_WORD_RE = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ¿¡]+")
+# Clean Latin/Spanish word regex without inverted punctuation ``¿¡``.
+_WORD_RE = ES_PROFILE.word_re
 
 
 def _fold(word: str) -> str:
     """Lowercase and strip accents, for dictionary lookup only."""
-    decomposed = unicodedata.normalize("NFD", word.lower())
-    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return fold_text(word)
 
 
-def word_score(word: str) -> float:
-    """Positive leans Spanish, negative leans English, zero is undecided.
-
-    Accents are treated as decisive: no English word in this corpus carries
-    one, and they survive in ``más``, ``está``, ``según`` -- exactly the words
-    that anchor a Spanish run.
-    """
-    if not word:
-        return 0.0
-    if any(ch in _ACCENTS for ch in word):
-        return 2.5
-    folded = _fold(word)
-    if not folded:
-        return 0.0
-    if folded in _AMBIGUOUS:
-        return 0.0
-    if folded in _ES_WORDS:
-        return 1.2
-    if folded in _EN_WORDS:
-        return -1.2
-    if len(folded) > 4 and folded.endswith(_ES_SUFFIXES):
-        return 0.9
-    if len(folded) > 5 and folded.endswith(_EN_SUFFIXES):
-        return -0.5
-    return 0.0
+def word_score(word: str, *, pair: LanguagePair | None = None) -> float:
+    """Positive leans target language, negative leans base language, zero is undecided."""
+    return (pair or EN_ES_PAIR).segmenter.word_score(word)
 
 
-# Switching languages mid-phrase costs something, which is what keeps a lone
-# foreign loanword inside a sentence from splitting it in two.
 _SWITCH_PENALTY = 1.8
-
-# ...but a switch that lands right after punctuation is the normal case in this
-# format -- the weave turns over at sentence and clause boundaries -- so it is
-# discounted. Without this the decoder is genuinely indifferent about *where*
-# inside a run of neutral words it crosses over, and picks the boundary
-# arbitrarily: "the future of art can | seem rather grim. | Afortunadamente"
-# comes out with the English clause marked Spanish.
 _PUNCTUATED_SWITCH = 0.40
-_BREAK_CHARS = ".!?;:,…\"”’)]—–"
-
-# Ceiling on how much a single bolded span may argue for its own language, so a
-# long English-looking section title cannot outvote the paragraph around it.
+_BREAK_CHARS = ".!?;:,…\"”’)]—–。！？；：、"
 _MAX_SPAN_EVIDENCE = 3.5
-
 _SWITCH_PUNCT_RE = re.compile(rf"[{re.escape(_BREAK_CHARS)}]\s*$")
 
 
@@ -223,50 +128,11 @@ def segment(
     scores: Sequence[float],
     weights: Sequence[float] | None = None,
     soft_break: Sequence[bool] | None = None,
+    *,
+    pair: LanguagePair | None = None,
 ) -> list[int]:
-    """Viterbi decode a per-token language score into 0=English / 1=Spanish labels.
-
-    Two-state HMM with no state priors: emissions are the per-token scores
-    above, and changing language costs :data:`_SWITCH_PENALTY` (discounted by
-    :data:`_PUNCTUATED_SWITCH` where ``soft_break`` marks a clause boundary).
-    Decoding globally rather than thresholding per token is what lets short
-    Spanish islands inside English sentences survive -- a lone ``**podemos
-    esperar que**`` is outvoted word by word but wins as a path.
-
-    Costs, not scores: a positive token score is evidence *for* Spanish, so it
-    lowers the cost of state 1 and raises the cost of state 0.
-    """
-    if not scores:
-        return []
-    weights = list(weights) if weights is not None else [1.0] * len(scores)
-    soft_break = list(soft_break) if soft_break is not None else [False] * len(scores)
-
-    emit = [s * w for s, w in zip(scores, weights)]
-    penalty = [
-        0.0,
-        *(_SWITCH_PENALTY * _PUNCTUATED_SWITCH if soft else _SWITCH_PENALTY for soft in soft_break[1:]),
-    ]
-
-    # Cheapest way to end at each state. Backpointers per token are stored as
-    # (came_from_for_en, came_from_for_es).
-    cost = [emit[0], -emit[0]]
-    back: list[tuple[int, int]] = [(0, 0)]
-
-    for i in range(1, len(emit)):
-        value = emit[i]
-        switch = penalty[i]
-        stay_en, from_es = cost[0], cost[1] + switch
-        stay_es, from_en = cost[1], cost[0] + switch
-        back.append((0 if stay_en <= from_es else 1, 1 if stay_es <= from_en else 0))
-        cost = [min(stay_en, from_es) + value, min(stay_es, from_en) - value]
-
-    state = 0 if cost[0] <= cost[1] else 1
-    labels = [state]
-    for i in range(len(emit) - 1, 0, -1):
-        state = back[i][state]
-        labels.append(state)
-    labels.reverse()
-    return labels
+    """Viterbi decode per-token language scores into 0=base / 1=target labels."""
+    return (pair or EN_ES_PAIR).segmenter.decode(scores, weights=weights, soft_break=soft_break)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,12 +144,12 @@ def segment(
 class Span:
     """A run of text in one language, with optional gloss and emphasis."""
 
-    lang: Literal["en", "es"]
+    lang: str
     text: str
     gloss: str | None = None
     bold: bool = False
     # True when the span was bolded in the source, i.e. it is a focus word of
-    # the lesson rather than incidental Spanish.
+    # the lesson rather than incidental target-language prose.
     target: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -299,9 +165,9 @@ class Span:
 
 @dataclass
 class Block:
-    """One paragraph, heading or byline."""
+    """One paragraph, heading, byline, date, quote or reference line."""
 
-    kind: Literal["p", "h", "byline", "date", "quote"]
+    kind: Literal["p", "h", "byline", "date", "quote", "ref"]
     spans: list[Span] = field(default_factory=list)
     level: int = 0
 
@@ -371,6 +237,9 @@ class Article:
     # sentences. Read from the front matter, so a lesson says how it was made --
     # the same reason the level and the amount are recorded there.
     weave: str | None = None
+    language_pair: str = DEFAULT_PAIR_ID
+    base_lang: str = DEFAULT_PAIR.base.code
+    target_lang: str = DEFAULT_PAIR.target.code
 
     def to_dict(self, *, with_blocks: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -384,6 +253,9 @@ class Article:
             "level": self.level,
             "register": self.register,
             "weave": self.weave,
+            "language_pair": self.language_pair,
+            "base_lang": self.base_lang,
+            "target_lang": self.target_lang,
             "source": self.source,
             "vocab": [v.to_dict() for v in self.vocab],
             "grammar": [g.to_dict() for g in self.grammar],
@@ -396,19 +268,14 @@ class Article:
     # -- derived ---------------------------------------------------------- #
 
     def focus_pairs(self) -> list[VocabPair]:
-        """Bold Spanish spans paired with the gloss that follows them.
-
-        This is the article's *implicit* syllabus: the phrases the author chose
-        to bold are the ones the lesson is teaching, and most of them are
-        glossed in place. Harvesting them here means the vocabulary deck seeds
-        itself from the text instead of needing a separate word list.
-        """
+        """Bold target-language spans paired with the gloss that follows them."""
+        pair = get_pair_or_default(self.language_pair)
         found: dict[str, VocabPair] = {}
         for block in self.blocks:
             for span in block.spans:
-                if span.lang != "es" or not span.target:
+                if span.lang != self.target_lang or not span.target:
                     continue
-                key = _focus_key(span.text)
+                key = _focus_key(span.text, pair=pair)
                 if not key:
                     continue
                 if key in found:
@@ -420,20 +287,29 @@ class Article:
         return list(found.values())
 
     def stats(self) -> dict[str, Any]:
-        es_words = en_words = 0
+        pair = get_pair_or_default(self.language_pair)
+        target_words = base_words = 0
         for block in self.blocks:
             for span in block.spans:
-                n = len(_WORD_RE.findall(span.text))
-                if span.lang == "es":
-                    es_words += n
+                if span.lang == self.target_lang:
+                    target_words += pair.target.count_units(span.text)
                 else:
-                    en_words += n
-        total = es_words + en_words
+                    base_words += pair.base.count_units(span.text)
+        total = target_words + base_words
+        ratio = round(target_words / total, 3) if total else 0.0
         return {
-            "es_words": es_words,
-            "en_words": en_words,
+            # Legacy EN-ES keys retained for full API/UI backwards compatibility:
+            "es_words": target_words,
+            "en_words": base_words,
             "words": total,
-            "spanish_ratio": round(es_words / total, 3) if total else 0.0,
+            "spanish_ratio": ratio,
+            # Language-neutral canonical keys:
+            "target_words": target_words,
+            "base_words": base_words,
+            "target_ratio": ratio,
+            "language_pair": self.language_pair,
+            "base_lang": self.base_lang,
+            "target_lang": self.target_lang,
             "paragraphs": sum(1 for b in self.blocks if b.kind == "p"),
         }
 
@@ -495,13 +371,54 @@ def _soft_breaks(units: Sequence[str]) -> list[bool]:
     return flags
 
 
-def parse_spans(raw: str) -> list[Span]:
-    """Turn one line of diglot prose into alternating English / Spanish spans."""
+def _split_units(text: str, pair: LanguagePair) -> list[str]:
+    """Split text into whitespace, placeholder, and script-coherent units.
+
+    For same-script pairs (e.g. EN/ES, EN/FR), whitespace and placeholder
+    boundaries are sufficient. For cross-script pairs (e.g. EN/ZH, EN/JA),
+    script transitions inside an unspaced run (``"read中文now"``) are also
+    split so each script run gets its own span.
+    """
+    raw_units = [u for u in _UNIT_SPLIT.split(text) if u != ""]
+    if pair.base.script == pair.target.script:
+        return raw_units
+
+    from .languages.types import _script_predicate
+
+    is_target = _script_predicate(pair.target.script)
+    is_base = _script_predicate(pair.base.script)
+    out: list[str] = []
+    for unit in raw_units:
+        if unit.isspace() or _PLACEHOLDER_RE.fullmatch(unit):
+            out.append(unit)
+            continue
+        buf: list[str] = []
+        cur_kind: str | None = None
+        for ch in unit:
+            kind = "t" if is_target(ch) else ("b" if is_base(ch) else "n")
+            if cur_kind is not None and kind != "n" and cur_kind != "n" and kind != cur_kind:
+                out.append("".join(buf))
+                buf = [ch]
+                cur_kind = kind
+            else:
+                buf.append(ch)
+                if kind != "n":
+                    cur_kind = kind
+        if buf:
+            out.append("".join(buf))
+    return out
+
+
+def parse_spans(raw: str, *, pair: LanguagePair | str | None = None) -> list[Span]:
+    """Turn one line of diglot prose into alternating base / target spans."""
+    resolved = pair if isinstance(pair, LanguagePair) else get_pair_or_default(pair)
+    seg = resolved.segmenter
+    base_code = resolved.base.code
+    target_code = resolved.target.code
+    token_re = resolved.target.word_re if resolved.base.script == resolved.target.script else None
+
     text = _clean(raw)
 
-    # Pull the two kinds of markup out into placeholder tokens so the
-    # segmenter sees a flat word stream. Bold spans become ``\\x00B{i}\\x00``
-    # and italic glosses ``\\x00G{i}\\x00``; both are opaque single tokens.
     bold_spans: list[str] = []
     gloss_spans: list[str] = []
 
@@ -515,24 +432,23 @@ def parse_spans(raw: str) -> list[Span]:
 
     text = _ITALIC_GLOSS_RE.sub(_take_gloss, text)
     text = _BOLD_RE.sub(_take_bold, text)
-    # Remaining italics are emphasis on ordinary text (English titles, the
-    # ``*the happy wombat*`` style quotation); keep the words, drop the marks.
     text = _ITALIC_RE.sub(r"\1", text)
 
-    # Split into alternating text / whitespace / placeholder units.
-    #
-    # A placeholder has to be a unit of its own, and it is a split boundary here
-    # rather than merely a token, because everything downstream recognises it
-    # with a full match. ``**será**,`` -- a bold word followed straight by a comma
-    # -- used to arrive as one unit, fail that match, and be appended as ordinary
-    # text; ``_tidy`` then strips the marker and takes the word with it. 65 spans
-    # in this corpus were being deleted from the reading text that way, silently,
-    # which is the worst possible shape for this bug: a hole in a sentence reads
-    # as nothing at all.
-    units = [u for u in _UNIT_SPLIT.split(text) if u != ""]
+    units = _split_units(text, resolved)
     scores: list[float] = []
     weights: list[float] = []
-    meta: list[tuple[str, int | None]] = []  # (kind, placeholder index)
+    meta: list[tuple[str, int | None]] = []
+
+    def _score_text_unit(chunk: str) -> tuple[float, float]:
+        if token_re is not None:
+            if any(ch in resolved.target.accent_chars for ch in chunk):
+                return 2.5, 1.0
+            words = token_re.findall(chunk)
+            if not words:
+                return 0.0, 0.0
+            return sum(seg.word_score(w) for w in words) / len(words), 1.0
+        s = seg.word_score(chunk)
+        return (s, 1.0) if s != 0.0 else (0.0, 0.0)
 
     for unit in units:
         if unit.isspace():
@@ -544,37 +460,27 @@ def parse_spans(raw: str) -> list[Span]:
         if match:
             kind, index = match.group(1), int(match.group(2))
             if kind == "B":
-                # A bolded span is usually a focus phrase -- the author bolded
-                # it *because* it is the Spanish being taught -- so it votes
-                # Spanish hard. But some articles bold English run-in labels
-                # too (``- **In-context learning:** Durante el ...``), and those
-                # must not drag the label into the Spanish run. So the span is
-                # scored on its own words first: total, not average, because a
-                # three-word English label has three words' worth of evidence,
-                # and clamped so a long bold title cannot outvote a paragraph.
-                inner = _WORD_RE.findall(bold_spans[index])  # type: ignore[index]
-                own = sum(word_score(w) for w in inner)
+                inner_text = bold_spans[index]  # type: ignore[index]
+                if token_re is not None:
+                    inner = token_re.findall(inner_text)
+                    own = sum(seg.word_score(w) for w in inner)
+                    if any(ch in resolved.target.accent_chars for ch in inner_text):
+                        own = max(own, 2.5)
+                else:
+                    own = seg.word_score(inner_text)
                 scores.append(3.0 if own >= 0 else max(own, -_MAX_SPAN_EVIDENCE))
             else:
                 scores.append(0.0)
             weights.append(1.0)
             meta.append((kind, index))
             continue
-        words = _WORD_RE.findall(unit)
-        if not words:
-            scores.append(0.0)
-            weights.append(0.0)
-            meta.append(("txt", None))
-        else:
-            # Average over the words in the unit so a long word does not
-            # outvote a short one purely by existing.
-            scores.append(sum(word_score(w) for w in words) / len(words))
-            weights.append(1.0)
-            meta.append(("txt", None))
+        score, weight = _score_text_unit(unit)
+        scores.append(score)
+        weights.append(weight)
+        meta.append(("txt", None))
 
-    labels = segment(scores, weights, _soft_breaks(units))
+    labels = seg.decode(scores, weights, _soft_breaks(units))
 
-    # Reassemble into spans, splitting on language change.
     spans: list[Span] = []
     pending_break = False
     for unit, label, (kind, index) in zip(units, labels, meta):
@@ -583,27 +489,20 @@ def parse_spans(raw: str) -> list[Span]:
                 spans[-1].text += unit
             continue
 
-        lang: Literal["en", "es"] = "es" if label == 1 else "en"
+        lang = target_code if label == 1 else base_code
         if kind == "B":
             inner = bold_spans[index]  # type: ignore[index]
-            # Bold survives either way -- it is the source's emphasis. Only
-            # Spanish bold counts as a focus word for the vocabulary deck.
-            spans.append(Span(lang=lang, text=inner, bold=True, target=lang == "es"))
+            spans.append(Span(lang=lang, text=inner, bold=True, target=lang == target_code))
             continue
         if kind == "G":
             gloss = gloss_spans[index]  # type: ignore[index]
-            # Attach the gloss to the Spanish run it annotates, and end that run
-            # there. Without the break the rest of the sentence keeps merging
-            # into the same span and the gloss drifts to the end of it -- which
-            # is how "al volverse (*by becoming*) algo peor" ended up glossed
-            # after "peor".
-            host = next((s for s in reversed(spans) if s.lang == "es"), None)
+            host = next((s for s in reversed(spans) if s.lang == target_code), None)
             if host is not None and host.gloss is None:
                 host.gloss = gloss
                 host.text = host.text.rstrip() + " "
                 pending_break = True
             else:
-                spans.append(Span(lang="en", text=f"({gloss})"))
+                spans.append(Span(lang=base_code, text=f"({gloss})"))
             continue
 
         if spans and spans[-1].lang == lang and not spans[-1].target and not pending_break:
@@ -612,24 +511,19 @@ def parse_spans(raw: str) -> list[Span]:
             spans.append(Span(lang=lang, text=unit))
         pending_break = False
 
-    spans = _absorb_plain_glosses(spans)
+    spans = _absorb_plain_glosses(spans, pair=resolved)
     return _tidy(spans)
 
 
-def _absorb_plain_glosses(spans: list[Span]) -> list[Span]:
-    """Fold ``**phrase** (english)`` glosses into the phrase they follow.
-
-    Some articles write the gloss without italics -- ``**funcionan según**
-    (operate on)``. A parenthetical is only treated as a gloss when it sits
-    immediately after a bolded Spanish span and contains no Spanish of its own,
-    which is narrow enough not to swallow ordinary English asides.
-    """
+def _absorb_plain_glosses(spans: list[Span], *, pair: LanguagePair = EN_ES_PAIR) -> list[Span]:
+    """Fold ``**phrase** (gloss)`` glosses into the phrase they follow."""
+    base_code = pair.base.code
     out: list[Span] = []
     i = 0
     while i < len(spans):
         span = spans[i]
         if (
-            span.lang == "en"
+            span.lang == base_code
             and span.text.strip().startswith("(")
             and span.text.strip().endswith(")")
             and out
@@ -637,7 +531,7 @@ def _absorb_plain_glosses(spans: list[Span]) -> list[Span]:
             and out[-1].gloss is None
         ):
             inner = span.text.strip()[1:-1].strip()
-            if not any(word_score(w) > 0 for w in _WORD_RE.findall(inner)):
+            if not pair.segmenter.has_target_language(inner):
                 out[-1].gloss = inner
                 i += 1
                 continue
@@ -690,31 +584,20 @@ def _looks_like_reference(text: str) -> bool:
     return bool(_REFERENCE_RE.search(text))
 
 
-def _focus_key(term: str) -> str:
-    """A dedup key for a focus phrase.
-
-    Imported lessons pick their own vocabulary, and a model asked for six items
-    will happily return ``relacionado con``, ``relacionada con``,
-    ``relacionadas con`` and ``estar relacionado con`` as four of them. Keying
-    on the first five letters of the *longest* word collapses those to one
-    without merging genuinely different entries -- ``vuelva`` and ``volverá``
-    still differ, and ``el sueño`` and ``del sueño`` collapse.
-    """
-    words = [w for w in _WORD_RE.findall(term) if w]
+def _focus_key(term: str, *, pair: LanguagePair = EN_ES_PAIR) -> str:
+    """A dedup key for a focus phrase."""
+    words = [w for w in pair.target.tokenize(term) if w]
     if not words:
-        return term.strip().lower()
+        return pair.target.fold(term.strip())
     longest = max(words, key=len)
-    folded = "".join(
-        ch for ch in unicodedata.normalize("NFD", longest.lower())
-        if unicodedata.category(ch) != "Mn"
-    )
+    folded = pair.target.fold(longest)
+    if not pair.target.word_spaced:
+        return folded
     return folded[:5] if len(folded) >= 5 else folded
 
 
-def _has_spanish(text: str) -> bool:
-    if any(ch in _ACCENTS for ch in text):
-        return True
-    return any(word_score(w) > 0 for w in _WORD_RE.findall(text))
+def _has_spanish(text: str, *, pair: LanguagePair = EN_ES_PAIR) -> bool:
+    return pair.segmenter.has_target_language(text)
 
 
 def _looks_like_heading_line(text: str) -> bool:
@@ -898,8 +781,7 @@ def _parse_grammar(lines: Sequence[str]) -> list[GrammarNote]:
 
 
 def _slugify(text: str, fallback: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:60] or fallback
+    return slugify_text(text, fallback, max_length=60)
 
 
 def _normalise(text: str) -> str:
@@ -927,8 +809,12 @@ def _drop_repeated_front_matter(blocks: list[Block], title: str | None, author: 
     return out
 
 
-def parse_article(source: str, *, fallback_slug: str, day: str | None = None) -> Article | None:
+def parse_article(
+    source: str, *, fallback_slug: str, day: str | None = None,
+    pair: LanguagePair | str | None = None,
+) -> Article | None:
     """Parse one article section (a whole file, or one ``### Day N`` chunk)."""
+    resolved_pair: LanguagePair = pair if isinstance(pair, LanguagePair) else get_pair_or_default(pair)
     lines = source.splitlines()
 
     title = author = url = preview = date = level = register = weave = None
@@ -939,6 +825,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
     section: Literal["front", "body", "anchors", "vocab", "grammar"] = "body"
     paragraph: list[str] = []
     in_anchors = False
+    saw_vocab = False
 
     def flush() -> None:
         nonlocal paragraph
@@ -950,7 +837,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
             return
         if _HR_RE.match(raw):
             return
-        spans = parse_spans(raw)
+        spans = parse_spans(raw, pair=resolved_pair)
         if not spans:
             return
         body.append(Block(kind="p", spans=spans))
@@ -982,6 +869,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
                 # ``#### 1. Recycled Vocabulary Box`` / ``#### 2. Grammar Breakdown``
                 if "vocab" in low:
                     section = "vocab"
+                    saw_vocab = True
                 elif "grammar" in low:
                     section = "grammar"
                 else:
@@ -990,7 +878,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
             section = "body"
             if day and day.lower() in low:
                 continue
-            body.append(Block(kind="h", level=depth, spans=[Span(lang="en", text=_clean(text))]))
+            body.append(Block(kind="h", level=depth, spans=[Span(lang=resolved_pair.base.code, text=_clean(text))]))
             continue
 
         if _HR_RE.match(line):
@@ -1000,6 +888,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
         if in_anchors:
             if any(k in stripped.lower() for k in ("recycled vocabulary", "vocabulary box")):
                 section = "vocab"
+                saw_vocab = True
                 continue
             if "grammar breakdown" in stripped.lower():
                 section = "grammar"
@@ -1029,59 +918,58 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
                     register = value.strip().lower()
                 elif "weave" in key or "grain" in key:
                     weave = value.strip().lower()
+                elif "language pair" in key or key == "languages":
+                    if pair is None:
+                        resolved_pair = get_pair_or_default(value.strip().lower())
                 elif "date" in key:
                     date = value
                 continue
             if not stripped:
                 continue
-            # The first non-field line ends the front matter, so fall through
-            # and treat it as the start of the article body. Not every file has
-            # a title heading -- some open straight into prose, and some use a
-            # bare bold line for the title.
             section = "body"
 
         if not stripped:
             flush()
             continue
 
-        # ``**By Author**`` on its own line.
         byline = _BOLD_RE.fullmatch(stripped)
         if byline and byline.group(1).lower().startswith("by "):
             flush()
-            body.append(Block(kind="byline", spans=[Span(lang="en", text=byline.group(1))]))
+            body.append(Block(kind="byline", spans=[Span(lang=resolved_pair.base.code, text=byline.group(1))]))
             continue
 
-        # Some articles reach the anchors without a heading, going straight to a
-        # bold ``**Recycled Vocabulary Box**``. Without this the whole
-        # post-reading section is read as more body prose.
         if byline:
             label = byline.group(1).strip().lower().rstrip(":")
             if "recycled vocabulary" in label or "grammar breakdown" in label:
                 flush()
                 in_anchors = True
-                section = "vocab" if "vocab" in label else "grammar"
+                if "vocab" in label:
+                    section = "vocab"
+                    saw_vocab = True
+                else:
+                    section = "grammar"
                 continue
 
-        if byline and not _has_spanish(byline.group(1)) and not paragraph:
+        if byline and not _has_spanish(byline.group(1), pair=resolved_pair) and not paragraph:
             flush()
-            body.append(Block(kind="h", level=3, spans=[Span(lang="en", text=_clean(byline.group(1)).strip())]))
+            body.append(Block(kind="h", level=3, spans=[Span(lang=resolved_pair.base.code, text=_clean(byline.group(1)).strip())]))
             continue
 
         if stripped.startswith("*") and stripped.endswith("*") and len(stripped) > 4 and not stripped.startswith("**"):
             inner = stripped.strip("*").strip()
             if re.match(r"^[A-Z][a-z]+ \d{1,2},? \d{4}$", inner):
                 flush()
-                body.append(Block(kind="date", spans=[Span(lang="en", text=inner)]))
+                body.append(Block(kind="date", spans=[Span(lang=resolved_pair.base.code, text=inner)]))
                 continue
 
         if not paragraph and _looks_like_heading_line(stripped):
             flush()
-            body.append(Block(kind="h", level=3, spans=[Span(lang="en", text=_clean(stripped).strip())]))
+            body.append(Block(kind="h", level=3, spans=[Span(lang=resolved_pair.base.code, text=_clean(stripped).strip())]))
             continue
 
         if _looks_like_reference(stripped):
             flush()
-            body.append(Block(kind="ref", spans=[Span(lang="en", text=_clean(stripped).strip())]))
+            body.append(Block(kind="ref", spans=[Span(lang=resolved_pair.base.code, text=_clean(stripped).strip())]))
             continue
 
         paragraph.append(stripped)
@@ -1099,7 +987,7 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
     if title is None:
         return None
 
-    if section == "grammar" and not grammar_lines and vocab_lines:
+    if section == "grammar" and not grammar_lines and vocab_lines and not saw_vocab:
         grammar_lines, vocab_lines = vocab_lines, []
 
     vocab = _parse_vocab_box(vocab_lines)
@@ -1122,6 +1010,9 @@ def parse_article(source: str, *, fallback_slug: str, day: str | None = None) ->
         level=level,
         register=register,
         weave=weave,
+        language_pair=resolved_pair.id,
+        base_lang=resolved_pair.base.code,
+        target_lang=resolved_pair.target.code,
     )
 
 
@@ -1194,7 +1085,7 @@ def parse_corpus(directory: Path) -> list[Article]:
         try:
             articles.extend(parse_file(path))
         except Exception as exc:  # a malformed file must not sink the library
-            print(f"[diglot] failed to parse {path.name}: {type(exc).__name__}: {exc}")
+            log.warning("failed to parse %s: %s: %s", path.name, type(exc).__name__, exc)
     return articles
 
 

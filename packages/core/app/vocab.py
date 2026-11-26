@@ -24,141 +24,107 @@ have enjoyed.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections import Counter
 from typing import Iterable
 
-from .diglot import Article, _WORD_RE
-
-# Words too common to be worth counting as "vocabulary": a learner meets these
-# in the first weeks, and left in they would dominate both the coverage figure
-# and the "words standing in your way" list, which is meant to be studyable.
-_FUNCTION_WORDS = frozenset(
-    """de la el los las un una unos unas que y e o u en por para con sin sobre entre
-    al del a se le les lo su sus mi tu es son era eran fue fueron ser estar está
-    están estaba han ha he hay había ni no sí si más menos muy ya tan todo toda
-    todos todas te os nos me mas esta este esto estos estas ese esa eso esos esas
-    como será sera puede pueden podía tener tiene tienen hace hacen hacer todo
-    pero aunque sino también tambien siempre nunca ahora antes después despues
-    luego aquí aqui allí alli así asi cada desde hasta cuando donde quien quienes
-    cual porque pues solo sólo mismo misma otro otra otros otras nada algo alguien
-    nadie bien mal sea sean fuera fuese siendo sido cuál quien aún aun todavía
-    todavia casi menos tanto tanta tantos tantas""".split()
+from .diglot import Article
+from .languages import (
+    DEFAULT_PAIR,
+    LanguagePair,
+    default_content_word,
+    default_head_word,
+    fold_text,
+    get_pair_or_default,
+    spanish_stem,
 )
 
-_REFLEXIVE = re.compile(r"(?:se|me|te|nos|os|lo|la|le|los|las|les)$")
-_ENDING = re.compile(r"(?:ando|iendo|ado|ido|ar|er|ir|es|os|as|o|a|e|s)$")
+# Words too common to be worth counting as "vocabulary": auto-folded in
+# ``app.languages.en_es`` so accented words like ``había`` and ``están`` match.
+_FUNCTION_WORDS = DEFAULT_PAIR.target.folded_function_words
 
 # Shortest stem worth comparing. Three, not four: stripping the ending from
 # "lugar" leaves "lug" and from "quedar" leaves "quod", and both still
 # distinguish the words they came from. The guard against noise is on the
 # *source* word instead -- see `known_stems`.
-MIN_STEM = 3
-MIN_SOURCE = 4
+MIN_STEM = DEFAULT_PAIR.target.min_stem_length
+MIN_SOURCE = DEFAULT_PAIR.target.min_source_length
 
 
 def fold(text: str) -> str:
     """Lowercase and strip accents, so ``atención`` matches ``atencion``."""
-    decomposed = unicodedata.normalize("NFD", text.lower())
-    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return fold_text(text)
 
 
-def content_word(term: str) -> str:
-    """The word in a phrase that carries the meaning.
-
-    A saved entry can be a whole construction -- ``se ponen de acuerdo``,
-    ``dar lugar a`` -- but only one of its words will ever appear as a token in
-    the article. The longest word is a good enough guess at which: it picks
-    ``acuerdo``, ``lugar``, ``remonta`` and ``obligó`` out of the examples
-    above, which is what matching needs.
-    """
-    pieces = [p for p in re.split(r"[\s/,(]+", term.strip()) if p]
-    if not pieces:
-        return term.strip()
-    if len(pieces) == 1:
-        return pieces[0]
-    return max(pieces, key=len)
+def content_word(term: str, *, pair: LanguagePair | None = None) -> str:
+    """The word in a phrase that carries the meaning."""
+    if pair is not None:
+        return pair.target.content_word(term)
+    return default_content_word(term)
 
 
-def stem(word: str) -> str:
-    """A crude Spanish stem, good enough to match inflections of one word.
-
-    Handles the two things that actually matter here: the reflexive clitic that
-    attaches in ``volverse`` but stands alone in ``se vuelve``, and the
-    stem-changing diphthongs (``vuelve`` / ``volverse``, ``piensa`` /
-    ``pensar``) that would otherwise make a prefix match fail on exactly the
-    verbs a learner most needs credit for.
-    """
-    text = fold(content_word(word))
-    if len(text) > 6:
-        text = _REFLEXIVE.sub("", text)
-    text = text.replace("ue", "o").replace("ie", "e")
-    trimmed = _ENDING.sub("", text)
-    # Falling back to the untrimmed form keeps inflections of the same word
-    # together: "quedar" and "quedo" both trim to "quod", so they must both
-    # take the same branch here or they would stop matching each other.
-    return (trimmed if len(trimmed) >= MIN_STEM else text)[:6]
+def stem(word: str, *, pair: LanguagePair | None = None) -> str:
+    """Target-language stemmer (Spanish by default)."""
+    if pair is not None:
+        return pair.target.stem(word)
+    return spanish_stem(word)
 
 
-def head_word(term: str) -> str:
+def head_word(term: str, *, pair: LanguagePair | None = None) -> str:
     """The first word of a possibly multi-word entry."""
-    return re.split(r"[\s/,(]", term.strip(), maxsplit=1)[0]
+    if pair is not None:
+        return pair.target.head_word(term)
+    return default_head_word(term)
 
 
-def known_stems(deck: Iterable[dict]) -> set[str]:
-    """Every stem the deck can recognise, from both the term and its lemma.
-
-    Also indexes each word of a multi-word entry, so ``dar lugar a`` is
-    recognised when the article says ``lugar``.
-    """
+def known_stems(deck: Iterable[dict], *, pair: LanguagePair | None = None) -> set[str]:
+    """Every stem the deck can recognise, from both the term and its lemma."""
+    resolved = pair or DEFAULT_PAIR
+    target = resolved.target
     out: set[str] = set()
     for word in deck:
         for field in ("term", "lemma"):
             value = (word.get(field) or "").strip()
             if not value:
                 continue
-            pieces = {value, head_word(value), content_word(value)}
+            pieces = {value, target.head_word(value), target.content_word(value)}
             for piece in pieces:
-                if len(fold(piece)) < MIN_SOURCE:
+                if len(target.fold(piece)) < target.min_source_length:
                     continue
-                candidate = stem(piece)
-                if len(candidate) >= MIN_STEM:
+                candidate = target.stem(piece)
+                if len(candidate) >= target.min_stem_length:
                     out.add(candidate)
     return out
 
 
-def article_vocabulary(article: Article) -> Counter[str]:
-    """Content words in the article's Spanish, with their frequencies."""
+def article_vocabulary(article: Article, *, pair: LanguagePair | None = None) -> Counter[str]:
+    """Content words in the article's target language, with their frequencies."""
+    resolved = pair or get_pair_or_default(getattr(article, "language_pair", None))
+    target = resolved.target
+    target_code = getattr(article, "target_lang", target.code)
     counts: Counter[str] = Counter()
     for block in article.blocks:
         if block.kind not in ("p", "h"):
             continue
         for span in block.spans:
-            if span.lang != "es":
+            if span.lang != target_code:
                 continue
-            for word in _WORD_RE.findall(span.text):
-                folded = fold(word)
-                if len(folded) < 3 or folded in _FUNCTION_WORDS:
+            for word in target.tokenize(span.text):
+                folded = target.fold(word)
+                if len(folded) < target.min_word_length or folded in target.folded_function_words:
                     continue
                 counts[folded] += 1
     return counts
 
 
-def text_coverage(article: Article, deck: Iterable[dict]) -> dict:
-    """What share of the article's Spanish content words the deck covers.
-
-    Reported two ways, because they answer different questions. ``token_ratio``
-    is the running-word figure -- the one that predicts how hard the reading
-    will feel. ``type_ratio`` is the share of *distinct* words known, which is
-    lower and moves faster, so it is the better measure of progress.
-    """
-    vocabulary = article_vocabulary(article)
+def text_coverage(article: Article, deck: Iterable[dict], *, pair: LanguagePair | None = None) -> dict:
+    """What share of the article's target-language content words the deck covers."""
+    resolved = pair or get_pair_or_default(getattr(article, "language_pair", None))
+    vocabulary = article_vocabulary(article, pair=resolved)
     if not vocabulary:
         return {"token_ratio": 1.0, "type_ratio": 1.0, "tokens": 0, "types": 0,
                 "known_types": 0, "unknown": []}
 
-    stems = known_stems(deck)
+    stems = known_stems(deck, pair=resolved)
     if not stems:
         return {
             "token_ratio": 0.0, "type_ratio": 0.0,
@@ -171,32 +137,33 @@ def text_coverage(article: Article, deck: Iterable[dict]) -> dict:
     known_types = 0
     unknown: list[tuple[str, int]] = []
     for word, count in vocabulary.items():
-        if stem(word) in stems:
+        if resolved.target.stem(word) in stems:
             known_tokens += count
             known_types += 1
         else:
             unknown.append((word, count))
 
     total = sum(vocabulary.values())
-    unknown.sort(key=lambda pair: -pair[1])
+    unknown.sort(key=lambda item: -item[1])
     return {
         "token_ratio": round(known_tokens / total, 3),
         "type_ratio": round(known_types / len(vocabulary), 3),
         "tokens": total,
         "types": len(vocabulary),
         "known_types": known_types,
-        # The words standing between the learner and a comfortable read, most
-        # frequent first: the most useful thing to study before starting.
         "unknown": [word for word, _ in unknown[:14]],
     }
 
 
-def verdict(token_ratio: float) -> tuple[str, str]:
+def verdict(token_ratio: float, *, pair: LanguagePair | None = None) -> tuple[str, str]:
     """A plain-language reading of the coverage number."""
+    resolved = pair or DEFAULT_PAIR
+    t_name = resolved.target.name
+    b_name = resolved.base.name
     if token_ratio >= 0.97:
-        return "comfortable", "You know almost every Spanish word here. Read it for fluency."
+        return "comfortable", f"You know almost every {t_name} word here. Read it for fluency."
     if token_ratio >= 0.90:
         return "stretch", "A few new words per paragraph. This is the range where reading teaches most."
     if token_ratio >= 0.75:
         return "demanding", "Dense with new words. Expect to look things up."
-    return "immersion", "Most of this Spanish is new. Lean on the English and enjoy the shape of it."
+    return "immersion", f"Most of this {t_name} is new. Lean on the {b_name} and enjoy the shape of it."

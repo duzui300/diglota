@@ -23,12 +23,12 @@ Two deliberate choices:
 
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from dataclasses import dataclass
 
-from .diglot import Article, _WORD_RE, content_fingerprint
-from .vocab import fold
-from .glossary import STOPWORDS
+from .diglot import Article, content_fingerprint
+from .languages import DEFAULT_PAIR, LanguagePair, get_pair_or_default
 
 
 @dataclass(frozen=True)
@@ -51,49 +51,44 @@ class ArticleWindows:
         return sum(sum(window.lemmas.values()) for window in self.windows)
 
 
-_SENTENCE_PUNCT = ".!?…¿¡\"'“‘-–—("
+_SENTENCE_PUNCT = DEFAULT_PAIR.target.sentence_punct
 
 
-def lemmas_in(text: str) -> list[str]:
-    """Folded Spanish content words in a passage, in order.
-
-    Two filters, and the second is subtle. Function words go because they are
-    most of any Spanish text and none of what anyone is learning. **Capitalised
-    words go unless they begin a sentence**: a proper noun stays in English even
-    inside a Spanish clause -- "desarrollado en London por Francis" is the weave
-    working correctly -- and counting those as Spanish vocabulary inflates the
-    words-read total and puts noise in the corpus graph.
-    """
+def lemmas_in(text: str, *, pair: LanguagePair | None = None) -> list[str]:
+    """Folded target-language content words in a passage, in order."""
+    resolved = pair or DEFAULT_PAIR
+    target = resolved.target
+    stopwords = resolved.combined_stopwords
+    punct = target.sentence_punct
     out: list[str] = []
     at_sentence_start = True
-    for match in _WORD_RE.finditer(text):
+    for match in target.word_matches(text):
         word = match.group(0)
         previous = text[:match.start()].rstrip()
-        starts_sentence = at_sentence_start or (previous[-1:] in _SENTENCE_PUNCT if previous else True)
+        starts_sentence = at_sentence_start or (previous[-1:] in punct if previous else True)
         at_sentence_start = False
 
-        if word[:1].isupper() and not starts_sentence:
+        if target.is_proper_noun(word, at_sentence_start=starts_sentence):
             continue
-        folded = fold(word)
-        if len(folded) < 3 or folded in STOPWORDS:
+        folded = target.fold(word)
+        if len(folded) < target.min_word_length or folded in stopwords:
             continue
         out.append(folded)
     return out
 
 
 _CACHE: dict[str, ArticleWindows] = {}
+_CACHE_LOCK = threading.Lock()
 _CACHE_LIMIT = 64
 
 
-def windows_for(article: Article) -> ArticleWindows:
-    """Windows for an article, cached against its content fingerprint.
-
-    Keyed by content rather than by slug so an edited or re-imported article
-    recomputes, and held in a plain dict because ``Article`` is not hashable
-    (it carries lists) and the object itself is already parsed and in memory.
-    """
-    key = content_fingerprint(article)
-    hit = _CACHE.get(key)
+def windows_for(article: Article, *, pair: LanguagePair | None = None) -> ArticleWindows:
+    """Windows for an article, cached against its content fingerprint."""
+    resolved = pair or get_pair_or_default(getattr(article, "language_pair", None))
+    target_code = getattr(article, "target_lang", resolved.target.code)
+    key = f"{resolved.id}:{content_fingerprint(article)}"
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
     if hit is not None:
         return hit
 
@@ -106,10 +101,11 @@ def windows_for(article: Article) -> ArticleWindows:
         glossed: set[str] = set()
         words = 0
         for span in block.spans:
-            words += len(_WORD_RE.findall(span.text))
-            if span.lang != "es":
+            profile = resolved.target if span.lang == target_code else resolved.base
+            words += profile.count_units(span.text)
+            if span.lang != target_code:
                 continue
-            lemmas_here = lemmas_in(span.text)
+            lemmas_here = lemmas_in(span.text, pair=resolved)
             for lemma in lemmas_here:
                 lemmas[lemma] += 1
             if span.gloss:
@@ -133,9 +129,10 @@ def windows_for(article: Article) -> ArticleWindows:
             glossed=frozenset().union(*(w.glossed for w in windows)),
         )
 
-    if len(_CACHE) >= _CACHE_LIMIT:
-        _CACHE.clear()
-    _CACHE[key] = data
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_LIMIT:
+            _CACHE.clear()
+        _CACHE[key] = data
     return data
 
 

@@ -74,7 +74,9 @@ def test_a_sentence_initial_capital_is_still_vocabulary():
 
 
 def test_accented_words_fold_to_a_plain_key():
-    assert "mas" in reading.lemmas_in("más arte")
+    lemmas = reading.lemmas_in("música más arte")
+    assert "musica" in lemmas
+    assert "mas" not in lemmas  # function word "más" is folded and filtered
 
 
 # -------------------------------------------------------- what was read --

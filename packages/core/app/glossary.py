@@ -26,86 +26,16 @@ from __future__ import annotations
 
 import re
 import threading
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .diglot import Article, _WORD_RE
-from .vocab import content_word, fold, head_word, stem
+from .diglot import Article
+from .languages import DEFAULT_PAIR, LanguagePair, fold_text, get_pair_or_default
 
-# Words too common to be worth an entry: a gloss for "de" is noise.
-_STOP = frozenset(
-    """de la el los las un unas unas que y e o u en por para con sin sobre
-    entre al del a se le les lo su sus mi tu es son era eran fue fueron ser
-    estar está están ni no sí si te os nos me más menos muy ya""".split()
-)
-
-# Endings that *build* a word rather than inflect one: ``profundamente`` and
-# ``profundidad`` are not forms of ``profundizar``, they are different words on the
-# same root -- and all four share the stem ``profun``, so the stem key alone cannot
-# tell them apart.
-#
-# That is how clicking the adverb ``profundamente`` came back with "to deepen", from
-# the lesson's entry for the verb. It looked authoritative: instant, no model call,
-# nothing saying it was a guess. A reader who hits two of those stops trusting the
-# instant lookups altogether, which is worse than the lookup being slow.
-#
-# A blocklist rather than a grammar of Spanish inflection, deliberately: the cost of
-# a miss here is one model call, and the cost of a false match is a wrong meaning
-# presented as fact.
-_DERIVED_SUFFIXES = (
-    "mente",                                     # adverbs: profundamente, claramente
-    "idad", "edad", "dad",                       # nouns: profundidad, soledad
-    "cion", "sion", "zon",                       # nouns: conexion, decision
-    "miento", "mientos",                         # nouns: sentimiento
-    "oso", "osa", "osos", "osas",                # adjectives: peligroso
-    "ivo", "iva", "ivos", "ivas",                # adjectives: comprensivo
-    "able", "ables", "ible", "ibles",            # adjectives: disponible
-    "ancia", "encia",                            # nouns: importancia, paciencia
-    "eza", "ura",                                # nouns: firmeza, cordura
-    "ismo", "ista",                              # nouns: realismo, artista
-    "isimo", "isima",                            # superlatives: altisimo
-    "ito", "ita", "illo", "illa",                # diminutives
-    "ador", "adora", "edor", "ente", "ante",     # agent nouns and participles
-)
-
-# Everything a learner will click constantly and never want to study. Exported
-# so other parts of the app can ask the same question -- the "words you keep
-# looking up" list was offering to save "del" and "a", because those *are* what
-# you look up most often, and that is exactly why they are not worth saving.
-#
-# The English words are here for a different reason: in a diglot some English
-# inevitably lands inside a span the segmenter called Spanish ("for", "main",
-# "that"). Counting those as Spanish vocabulary inflates the exposure totals and
-# puts junk into the corpus graph, and the fix is the same list.
-#
-# The short function words ("of", "in", "at", "is") were missing until the passage
-# map started naming clusters from what their titles share -- and promptly named a
-# cluster of fifteen art articles "of", because "the end of creativity" and "the
-# start of a new movement" both have one. Any list this long is going to have a
-# hole in it; this is where the hole was.
-STOPWORDS = frozenset(_STOP) | frozenset(
-    """esto esta este estos estas eso esa esos esas aquel aquella ello ellos ellas
-    nosotras vosotros vosotras cual cuales quien quienes cuando donde como porque
-    aunque pero sino también tambien siempre nunca ahora antes despues luego aquí
-    alli así tan tanto todo toda todos todas otro otra mismo misma cada algun
-    alguna ningun ninguna nada nadie algo alguien sea sean fuera fuese siendo sido
-    hay había habia hace hacen hacer puede pueden podía podia tiene tienen tenía
-    tenia debe deben era eres somos sois estábamos estaban ser estar haber tener
-    qué que cómo quien cuál dónde cuándo cuánto""".split()
-) | frozenset(
-    """the and for that with this from have been were are was will would could should
-    they them their there here what when where which while whose about into over
-    than then they're more most some such only also just very much many other
-    these those your you're our ours its it's does did doing done make makes made
-    take takes taken give gives given come comes came goes went going said says
-    say see sees seen look looks looked know knows known think thinks thought
-    a an of in on at by to as is am it or but not no nor so if be been being do
-    has had can may might must my me we us he she his her him one two all any
-    out up down off own same too why how who whom both each few per via within
-    without across along around near upon toward towards against between among
-    during before after above below under""".split()
-)
+# Words too common to be worth an entry: auto-folded in ``app.languages``.
+_STOP = DEFAULT_PAIR.target.folded_function_words
+_DERIVED_SUFFIXES = DEFAULT_PAIR.target.derived_suffixes
+STOPWORDS = DEFAULT_PAIR.combined_stopwords
 
 _MIN_WORD = 2
 
@@ -147,56 +77,48 @@ class Glossary:
     # argument as the inflection check: the lookup has to be right about *this* word in
     # *this* passage, or the reader learns to distrust it.
     entries: dict[str, list["Entry"]] = field(default_factory=dict)
+    pair: LanguagePair = field(default=DEFAULT_PAIR, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # -- indexing --------------------------------------------------------- #
 
     @staticmethod
-    def keys_for(term: str) -> list[str]:
-        """Every key a term should be findable under, best first.
-
-        The stem key is what makes inflections work: ``vuelve`` and ``volverse``
-        share one, so an entry for either answers a click on the other.
-        """
+    def keys_for(term: str, *, pair: LanguagePair | None = None) -> list[str]:
+        """Every key a term should be findable under, best first."""
+        resolved = pair or DEFAULT_PAIR
+        target = resolved.target
         term = term.strip()
         if not term:
             return []
-        keys = [f"w:{fold(term)}"]
-        head = head_word(term)
-        # Only when the head is a word worth keying on. For a Spanish phrase the first
-        # word is often a clitic -- the head of "se vuelve" is "se" -- and keying entries
-        # under it made seventeen reflexive phrases in this library candidates for each
-        # other: a click on "se vuelve" could be answered with whichever lesson's
-        # "se han debilitado" ranked first, which is how it came back as "to weaken".
-        # The content-word key below is the one that was wanted.
-        if head and fold(head) != fold(term) and fold(head) not in STOPWORDS:
-            keys.append(f"w:{fold(head)}")
-        content = content_word(term)
+        folded_term = target.fold(term)
+        keys = [f"w:{folded_term}"]
+        head = target.head_word(term)
+        if head and target.fold(head) != folded_term and target.fold(head) not in resolved.combined_stopwords:
+            keys.append(f"w:{target.fold(head)}")
+        content = target.content_word(term)
         if content:
-            keys.append(f"c:{fold(content)}")
+            keys.append(f"c:{target.fold(content)}")
         for piece in (term, head, content):
-            candidate = stem(piece)
-            if len(candidate) >= 3:
+            candidate = target.stem(piece)
+            if len(candidate) >= target.min_stem_length:
                 keys.append(f"s:{candidate}")
         return list(dict.fromkeys(keys))
 
-    def _add(self, entry: Entry) -> None:
+    def _add(self, entry: Entry, *, pair: LanguagePair | None = None) -> None:
         if not entry.gloss or not entry.term:
             return
-        for key in self.keys_for(entry.term):
+        for key in self.keys_for(entry.term, pair=pair or self.pair):
             bucket = self.entries.setdefault(key, [])
             if any(same.term == entry.term and same.gloss == entry.gloss
                    and same.article == entry.article for same in bucket):
                 continue
             bucket.append(entry)
-            # Best source first, so a reader of this dataclass can take [0] and get
-            # what they would have got before there was a list at all.
             bucket.sort(key=lambda item: _SOURCE_RANK.get(item.source, 9))
 
     # -- building --------------------------------------------------------- #
 
     def build(self, articles: Iterable[Article], deck: Iterable[dict]) -> "Glossary":
-        fresh = Glossary()
+        fresh = Glossary(pair=self.pair)
         for article in articles:
             fresh._absorb_article(article)
         for word in deck:
@@ -206,15 +128,16 @@ class Glossary:
         return self
 
     def _absorb_article(self, article: Article) -> None:
-        # 1. Bold focus phrases with their gloss: the cleanest source, because
-        #    the author bolded them precisely to teach them.
-        for pair in article.focus_pairs():
-            if pair.en:
-                self._add(Entry(term=pair.es, gloss=pair.en, source="focus",
-                                article=article.slug, article_title=article.title))
+        pair = get_pair_or_default(getattr(article, "language_pair", None))
+        target = pair.target
+        target_code = getattr(article, "target_lang", target.code)
+        # 1. Bold focus phrases with their gloss.
+        for item in article.focus_pairs():
+            if item.en:
+                self._add(Entry(term=item.es, gloss=item.en, source="focus",
+                                article=article.slug, article_title=article.title), pair=pair)
 
-        # 2. The post-reading vocabulary box, which lists the headword together
-        #    with its inflections: "volverse / se vuelva, se volverá".
+        # 2. The post-reading vocabulary box.
         for anchor in article.vocab:
             if not anchor.gloss:
                 continue
@@ -223,29 +146,28 @@ class Glossary:
                 if len(form) < _MIN_WORD:
                     continue
                 self._add(Entry(term=form, gloss=anchor.gloss, source="vocabulary box",
-                                article=article.slug, article_title=article.title))
+                                article=article.slug, article_title=article.title), pair=pair)
 
-        # 3. Inline glosses. The parser ends a Spanish span where its gloss
-        #    begins, so the gloss describes the end of that span -- the last
-        #    word, or the last few words when the gloss is a phrase.
+        # 3. Inline glosses.
         for block in article.blocks:
             for span in block.spans:
-                if span.lang != "es" or not span.gloss:
+                if span.lang != target_code or not span.gloss:
                     continue
-                words = _WORD_RE.findall(span.text)
+                words = target.tokenize(span.text)
                 if not words:
                     continue
                 last = words[-1]
-                if len(last) < _MIN_WORD or fold(last) in _STOP:
+                if len(last) < _MIN_WORD or target.fold(last) in target.folded_function_words:
                     continue
                 gloss_words = len(span.gloss.split())
                 if gloss_words <= 2:
                     self._add(Entry(term=last, gloss=span.gloss, source="article",
-                                    article=article.slug, article_title=article.title))
+                                    article=article.slug, article_title=article.title), pair=pair)
                 elif gloss_words <= 4 and len(words) >= gloss_words:
-                    phrase = " ".join(words[-gloss_words:])
+                    joiner = " " if target.word_spaced else ""
+                    phrase = joiner.join(words[-gloss_words:])
                     self._add(Entry(term=phrase, gloss=span.gloss, source="article",
-                                    article=article.slug, article_title=article.title))
+                                    article=article.slug, article_title=article.title), pair=pair)
 
     def _absorb_deck_word(self, word: dict) -> None:
         gloss = (word.get("gloss") or "").strip()
@@ -254,38 +176,28 @@ class Glossary:
         term = (word.get("term") or "").strip()
         if not term:
             return
+        pair = get_pair_or_default(word.get("language_pair"))
         entry = Entry(
             term=term, gloss=gloss, source="your deck",
             lemma=(word.get("lemma") or None), pos=(word.get("pos") or None),
         )
-        self._add(entry)
+        self._add(entry, pair=pair)
         lemma = (word.get("lemma") or "").strip()
-        if lemma and fold(lemma) != fold(term):
-            self._add(Entry(term=lemma, gloss=gloss, source="your deck", pos=entry.pos))
+        if lemma and pair.target.fold(lemma) != pair.target.fold(term):
+            self._add(Entry(term=lemma, gloss=gloss, source="your deck", pos=entry.pos), pair=pair)
 
     # -- lookup ----------------------------------------------------------- #
 
-    def lookup(self, term: str, *, article: str | None = None) -> Entry | None:
-        """The lesson's own translation of a word, or ``None``.
-
-        The stem key is what lets a click on ``vuelve`` reach the ``volverse`` entry,
-        and it is also how a click on ``profundamente`` reached the ``profundizar``
-        entry and was told "to deepen". So a stem hit is checked against the entry it
-        found: inflections answer, derivations do not, and a word the lesson does not
-        translate falls through to the model -- an instant wrong answer is worse than
-        a slow right one.
-
-        ``article`` is the passage being read, and an entry from it wins over an equally
-        good entry from somewhere else. A form can be glossed differently by two
-        lessons, and the reader wants the one in front of them.
-        """
+    def lookup(self, term: str, *, article: str | None = None,
+               pair: LanguagePair | None = None) -> Entry | None:
+        resolved = pair or self.pair
         with self._lock:
-            for key in self.keys_for(term):
+            for key in self.keys_for(term, pair=resolved):
                 bucket = self.entries.get(key)
                 if not bucket:
                     continue
                 if key.startswith("s:"):
-                    bucket = [entry for entry in bucket if is_inflection(term, entry.term)]
+                    bucket = [entry for entry in bucket if is_inflection(term, entry.term, pair=resolved)]
                     if not bucket:
                         continue
                 if article:
@@ -323,35 +235,9 @@ class Glossary:
 
 def normalise(text: str) -> str:
     """Lowercase and strip accents -- exposed for callers doing their own keys."""
-    decomposed = unicodedata.normalize("NFD", text.lower())
-    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return fold_text(text)
 
 
-def is_inflection(form: str, term: str) -> bool:
-    """Whether a stem match is the same word in another form.
-
-    Shape, not grammar: a verb's person and tense endings pass, a nominal or
-    adjectival ending passes, and an ending that *builds* a different word does not.
-    ``profundiza`` is a form of ``profundizar``; ``profundamente`` is not.
-
-    Two cases are left deliberately unresolved because the shape cannot decide them:
-    ``profundo`` is both an adjective in its own right and the first person singular
-    of ``profundizar``, and the ending ``-o`` is a legitimate one for both. Answering
-    from the stem there is a coin flip, and it is the sort of coin flip this function
-    exists to stop making -- but it is caught only when the ending gives it away.
-
-    A miss costs one model call. A false match costs a wrong meaning shown as fact,
-    which is why the list is of endings rather than a promise of coverage.
-    """
-    f, t = fold(form).strip(), fold(term).strip()
-    if not f or not t or f == t:
-        return f == t
-    if t.startswith(f) or f.startswith(t):
-        # One is the other with something glued on: "darse" for "darse cuenta de".
-        return True
-    if f.endswith(t):
-        return True
-    for suffix in _DERIVED_SUFFIXES:
-        if f.endswith(suffix) and not t.endswith(suffix):
-            return False
-    return True
+def is_inflection(form: str, term: str, *, pair: LanguagePair | None = None) -> bool:
+    """Whether a stem match is the same word in another form."""
+    return (pair or DEFAULT_PAIR).target.is_inflection(form, term)

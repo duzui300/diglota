@@ -27,6 +27,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from typing import Any, Iterable
 from .fetch import FetchError, extract_article, fetch_url, search_web
 from . import registers
 from .tutor import SYSTEM, Tutor
+
+log = logging.getLogger("diglot.recommend")
 
 # Words too common to be evidence that two texts share a topic.
 _STOP = frozenset(
@@ -401,8 +404,8 @@ def recommend(
                 for future in as_completed(futures):
                     try:
                         scored.append(future.result())
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("candidate scoring failed: %s", exc)
                     checked += 1
                     progress.step("Checking each candidate against your vocabulary",
                                   done=checked, total=len(candidates),

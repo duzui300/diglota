@@ -15,6 +15,7 @@ progress that a streak counter cannot give.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -22,35 +23,33 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .diglot import Article, parse_file
+from .languages import DEFAULT_PAIR, LanguagePair, get_pair_or_default
 from . import registers, vocab
 
-# Difficulty bands, by the share of the article's words that are Spanish. The
-# cut points are set from the corpus distribution: the hand-made articles run
-# from about 30% to 90%.
-SHELVES = (
-    ("gentle", 0.00, 0.45, "Mostly English, Spanish in short phrases"),
-    ("steady", 0.45, 0.62, "A real weave, roughly half Spanish"),
-    ("dense", 0.62, 0.78, "Spanish carries whole sentences"),
-    ("immersion", 0.78, 1.01, "Spanish-dominant"),
-)
+log = logging.getLogger("diglot.library")
+
+# Difficulty bands, by the share of target-language words.
+SHELVES = DEFAULT_PAIR.shelves
 
 
-def shelf_for(ratio: float) -> tuple[str, str]:
-    for name, low, high, description in SHELVES:
-        if low <= ratio < high:
-            return name, description
-    return "steady", ""
+def shelf_for(ratio: float, *, pair: LanguagePair | None = None) -> tuple[str, str]:
+    return (pair or DEFAULT_PAIR).shelf_for(ratio)
 
 
 def deck_signature(deck: Iterable[dict[str, Any]]) -> int:
-    """A cheap fingerprint of what the deck actually contains.
-
-    Size alone is not enough: swapping one saved word for another leaves the
-    count unchanged, and every cache keyed on it would keep serving numbers
-    computed against the deck that no longer exists. Cheap enough to recompute on
-    each request -- a personal deck is hundreds of words, not millions.
-    """
-    return hash(tuple(sorted(str(word.get("term") or "") for word in deck)))
+    """A cheap fingerprint of what the deck actually contains."""
+    return hash(
+        tuple(
+            sorted(
+                (
+                    str(word.get("term") or ""),
+                    str(word.get("lemma") or ""),
+                    str(word.get("gloss") or ""),
+                )
+                for word in deck
+            )
+        )
+    )
 
 
 @dataclass
@@ -77,13 +76,12 @@ class LibraryEntry:
     def to_dict(self, *, with_blocks: bool = False) -> dict[str, Any]:
         data = self.article.to_dict(with_blocks=with_blocks)
         data["imported"] = self.imported
-        shelf, description = shelf_for(data["stats"]["spanish_ratio"])
+        pair = get_pair_or_default(getattr(self.article, "language_pair", None))
+        ratio = data["stats"].get("target_ratio", data["stats"]["spanish_ratio"])
+        shelf, description = shelf_for(ratio, pair=pair)
         data["shelf"] = shelf
         data["shelf_description"] = description
         data["focus_count"] = len(self.article.focus_pairs())
-        # Register is carried here rather than written into the corpus files:
-        # the user's hand-made articles are theirs, and a guess does not belong
-        # in them. Imports get a judgment instead, written to their own file.
         register, inferred = self.register()
         data["register"] = register
         data["register_inferred"] = inferred
@@ -134,50 +132,60 @@ class Library:
 
     def all(self) -> list[LibraryEntry]:
         self._ensure()
-        return sorted(self._entries.values(), key=lambda e: (e.article.stats()["spanish_ratio"], e.article.title))
+        with self._lock:
+            entries = list(self._entries.values())
+        return sorted(
+            entries,
+            key=lambda e: (e.article.stats().get("target_ratio", e.article.stats()["spanish_ratio"]), e.article.title),
+        )
 
     def get(self, slug: str) -> LibraryEntry | None:
         self._ensure()
-        return self._entries.get(slug)
+        with self._lock:
+            return self._entries.get(slug)
 
     def slugs(self) -> list[str]:
         self._ensure()
-        return list(self._entries)
+        with self._lock:
+            return list(self._entries)
 
     def __len__(self) -> int:
         self._ensure()
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
-    def add_article(self, slug: str, article: Article, *, imported: bool = True) -> None:
+    def add_article(self, slug: str, article: Article, *, imported: bool = True,
+                    path: Path | None = None) -> None:
         """Register an article that was just written to disk."""
         with self._lock:
-            self._entries[slug] = LibraryEntry(article, imported=imported)
+            self._entries[slug] = LibraryEntry(article, imported=imported, path=path)
             self._loaded = True
+            self._coverage.clear()
+            self.revision += 1
 
     # -- derived views ---------------------------------------------------- #
 
     def coverage(self, article: Article, deck: list[dict[str, Any]]) -> dict[str, Any]:
-        """How much of an article the learner already has.
-
-        Two measures, because they answer different questions. ``focus`` is the
-        lesson's own syllabus -- the phrases it bolds -- and tells you how much
-        of *what this article teaches* you have already met. ``text`` is the
-        whole Spanish text, and tells you how comfortably you can read it. The
-        second is the one that decides whether to open the article at all.
-
-        Cached: the answer depends on the article, what is in the deck, and
-        nothing else, so a page that asks about twenty-four articles pays for the
-        stemming pass once rather than once per visit.
-        """
-        key = (self.revision, deck_signature(deck), article.slug)
-        hit = self._coverage.get(key)
+        """How much of an article the learner already has."""
+        sig = deck_signature(deck)
+        with self._lock:
+            rev = self.revision
+            key = (rev, sig, article.slug)
+            hit = self._coverage.get(key)
         if hit is not None:
             return hit
         result = self._measure_coverage(article, deck)
-        self._coverage[key] = result
+        with self._lock:
+            # Evict stale revisions/deck signatures so the cache stays bounded.
+            if len(self._coverage) >= 512:
+                self._coverage = {
+                    k: v for k, v in self._coverage.items() if k[0] == self.revision and k[1] == sig
+                }
+            self._coverage[(rev, sig, article.slug)] = result
         return result
 
     def _measure_coverage(self, article: Article, deck: list[dict[str, Any]]) -> dict[str, Any]:
+        pair = get_pair_or_default(getattr(article, "language_pair", None))
         pairs = article.focus_pairs()
         known_norm = {_normalise_term(w.get("term") or "") for w in deck}
         known_norm |= {_normalise_term(w.get("lemma") or "") for w in deck}
@@ -185,13 +193,13 @@ class Library:
 
         if pairs:
             hit = [p for p in pairs if _normalise_term(p.es) in known_norm
-                   or _normalise_term(vocab_head(p.es)) in known_norm]
+                   or _normalise_term(pair.target.head_word(p.es)) in known_norm]
         else:
             hit = []
         missing = [p.es for p in pairs if p not in hit]
 
-        text = vocab.text_coverage(article, deck)
-        band, advice = vocab.verdict(text["token_ratio"])
+        text = vocab.text_coverage(article, deck, pair=pair)
+        band, advice = vocab.verdict(text["token_ratio"], pair=pair)
         return {
             "total": len(pairs),
             "known": len(hit),
@@ -203,19 +211,13 @@ class Library:
         }
 
     def passages_per_file(self) -> dict[str, int]:
-        """How many passages each file holds, keyed by path.
-
-        Usually one. A hand-made compilation holds several -- the corpus ships one
-        with four lessons under day headings -- and anything that edits a file *for
-        a passage* has to know the difference, because a front-matter line in a
-        compilation belongs to one passage rather than to the file. The parser
-        reports passages and not their line ranges, so a single passage inside such
-        a file cannot be addressed at all.
-        """
+        """How many passages each file holds, keyed by path."""
         self._ensure()
         counts: dict[str, int] = {}
         for entry in self.all():
-            key = str(entry.path or "")
+            if entry.path is None:
+                continue
+            key = str(entry.path)
             counts[key] = counts.get(key, 0) + 1
         return counts
 
@@ -276,5 +278,5 @@ def _safe_parse(path: Path) -> Iterable[Article]:
     try:
         return parse_file(path)
     except Exception as exc:  # a malformed file must not sink the library
-        print(f"[library] failed to parse {path.name}: {type(exc).__name__}: {exc}")
+        log.warning("failed to parse %s: %s: %s", path.name, type(exc).__name__, exc)
         return []

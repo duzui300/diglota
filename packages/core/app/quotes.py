@@ -32,14 +32,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .diglot import Article, Span
+from .languages import DEFAULT_PAIR, LanguagePair, get_pair_or_default
 from .reading import lemmas_in
 
-# Sentence-final punctuation, including the closing quote or bracket that often
-# follows it -- and the Spanish inverted marks are openers, so they are not here.
-_END = re.compile(r"[.!?…]+[\"”'’)\]]*")
-# Neither ``Sr.`` nor ``3.14`` ends a sentence. Abbreviations are matched as a
-# short run of letters before the dot, numbers by a digit on both sides.
-_ABBREV = re.compile(r"\b(?:[A-Z]|Sr|Sra|Dr|Dra|EE|UU|etc|p\. ej|aprox|núm)\.$", re.I)
+# Sentence-final punctuation and abbreviations (case-sensitive single initials,
+# case-insensitive explicit abbreviations) delegated to ``app.languages``.
+_END = DEFAULT_PAIR.target.sentence_end_re
+_ABBREV = DEFAULT_PAIR.target.abbrev_re
 
 
 @dataclass
@@ -72,17 +71,15 @@ class Quote:
                 "term": self.term, "spans": self.spans, "glosses": self.glosses}
 
 
-def sentences(plain: str) -> list[Sentence]:
-    """Split a paragraph into sentences by offset, keeping the text between them.
-
-    Conservative on purpose: an abbreviation or a decimal that is read as a
-    sentence end would cut a quote in half, and a quote cut in half is worse than
-    a quote that runs two sentences together.
-    """
+def sentences(plain: str, *, pair: LanguagePair | None = None) -> list[Sentence]:
+    """Split a paragraph into sentences by offset, keeping the text between them."""
+    resolved = pair or DEFAULT_PAIR
+    end_re = resolved.target.sentence_end_re
+    abbrev_re = resolved.target.abbrev_re
     out: list[Sentence] = []
     start = 0
-    for match in _END.finditer(plain):
-        if _ABBREV.search(plain[start:match.end()]) or _is_decimal(plain, match.start()):
+    for match in end_re.finditer(plain):
+        if (abbrev_re and abbrev_re.search(plain[start:match.end()])) or _is_decimal(plain, match.start()):
             continue
         end = match.end()
         text = plain[start:end].strip()
@@ -136,48 +133,36 @@ def locate(article: Article, block_index: int, text: str) -> tuple[Quote | None,
     raw_start = index[at]
     raw_end = index[at + len(needle) - 1] + 1
 
-    found = sentences(plain)
+    pair = get_pair_or_default(getattr(article, "language_pair", None))
+    target_code = getattr(article, "target_lang", pair.target.code)
+    target_name = pair.target.name
+
+    found = sentences(plain, pair=pair)
     touched = [s for s in found if s.end > raw_start and s.start < raw_end]
     if not touched:
         return None, "that is not a whole sentence"
     start, end = touched[0].start, touched[-1].end
     text_out = plain[start:end].strip()
 
-    es, en = _split(block.spans, start, end)
+    es, en = _split(block.spans, start, end, target_lang=target_code)
     if not es.strip():
-        return None, "there is no Spanish in that sentence"
-    if not _vocabulary(es, plain):
-        # A name, or a stray abbreviation the segmenter read as Spanish. Keeping
-        # it would put a sentence with nothing to learn in the collection, and
-        # the collection is only useful if everything in it is worth returning to.
-        return None, "that sentence has no Spanish words to learn in it"
+        return None, f"there is no {target_name} in that sentence"
+    if not _vocabulary(es, plain, pair=pair):
+        return None, f"that sentence has no {target_name} words to learn in it"
 
     clipped = clip(block.spans, start, end)
     return Quote(
         text=text_out, es=es.strip(), en=en.strip(),
         block_index=block_index, start=start, end=end,
-        term=_focus(clipped),
+        term=_focus(clipped, target_lang=target_code),
         spans=[s.to_dict() for s in clipped],
         glosses=" ".join(s.gloss for s in clipped if s.gloss),
     ), ""
 
 
-def _vocabulary(es: str, paragraph: str) -> list[str]:
-    """The Spanish content words in a quote that are vocabulary worth learning.
-
-    ``lemmas_in`` drops function words and capitals that are not sentence-initial,
-    which is how the rest of the app decides what counts as Spanish vocabulary.
-    But it judges "sentence-initial" from the string it is given, and a quote's
-    Spanish usually starts *mid-sentence* -- "dijo Ai-Da" begins with a verb --
-    so its first word would always be treated as starting a sentence and a name
-    would slip through as vocabulary.
-
-    The paragraph is the honest context: a word counts here only if it also
-    counts there, which is the same answer the corpus graph and the exposure
-    counts give for that word.
-    """
-    known = set(lemmas_in(paragraph))
-    return [word for word in lemmas_in(es) if word in known]
+def _vocabulary(es: str, paragraph: str, *, pair: LanguagePair | None = None) -> list[str]:
+    known = set(lemmas_in(paragraph, pair=pair))
+    return [word for word in lemmas_in(es, pair=pair) if word in known]
 
 
 def _normalise(plain: str) -> tuple[str, list[int]]:
@@ -204,17 +189,17 @@ def _normalise(plain: str) -> tuple[str, list[int]]:
     return "".join(out), index
 
 
-def _split(spans: list[Span], start: int, end: int) -> tuple[str, str]:
-    """The Spanish and the English inside a character range, as plain text."""
-    spanish: list[str] = []
-    english: list[str] = []
+def _split(spans: list[Span], start: int, end: int, *, target_lang: str = "es") -> tuple[str, str]:
+    """The target language and the base language inside a character range, as plain text."""
+    target_parts: list[str] = []
+    base_parts: list[str] = []
     for span, s_start, s_end in _placed(spans):
         overlap_start, overlap_end = max(start, s_start), min(end, s_end)
         if overlap_start >= overlap_end:
             continue
         piece = span.text[overlap_start - s_start:overlap_end - s_start]
-        (spanish if span.lang == "es" else english).append(piece)
-    return "".join(spanish), "".join(english)
+        (target_parts if span.lang == target_lang else base_parts).append(piece)
+    return "".join(target_parts), "".join(base_parts)
 
 
 def _placed(spans: list[Span]) -> list[tuple[Span, int, int]]:
@@ -267,9 +252,9 @@ def _retext(span: Span, text: str) -> Span:
     return Span(lang=span.lang, text=text, gloss=span.gloss, bold=span.bold, target=span.target)
 
 
-def _focus(clipped: list[Span]) -> str | None:
+def _focus(clipped: list[Span], *, target_lang: str = "es") -> str | None:
     """The word the lesson itself bolded, which is what the quote is teaching."""
     for span in clipped:
-        if span.lang == "es" and span.target and span.text.strip():
+        if span.lang == target_lang and span.target and span.text.strip():
             return span.text.strip()
     return None

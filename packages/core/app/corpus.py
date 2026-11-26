@@ -316,40 +316,51 @@ def _subject_of(title: str) -> str:
     return stripped if len(stripped.split()) >= 2 else (title or "").strip()
 
 
+def _title_stem(word: str) -> str:
+    """Lightweight language-neutral stemmer for titles (avoids Spanish diphthong mangling on English)."""
+    from .languages import fold_text
+
+    folded = fold_text(word)
+    if len(folded) > 4:
+        for suffix in ("ies", "es", "s", "ed", "ing"):
+            if folded.endswith(suffix) and len(folded) - len(suffix) >= 3:
+                return folded[:-len(suffix)]
+    return folded
+
+
 def _title_words(text: str) -> dict[str, str]:
     """{surface form: stem} for the content words of a title."""
     from .glossary import STOPWORDS
-    from .vocab import stem
+    from .languages import fold_text
 
     out: dict[str, str] = {}
     for word in _WORDS_RE.split((text or "").lower()):
-        if len(word) >= 2 and word not in STOPWORDS:
-            out.setdefault(word, stem(word))
+        if len(word) >= 2 and fold_text(word) not in STOPWORDS:
+            out.setdefault(word, _title_stem(word))
     return out
 
 
-_WORDS_RE = re.compile(r"[^0-9a-záéíóúüñ]+")
+_WORDS_RE = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def build_graph(entries: Iterable[Any], coverage: dict[str, float]) -> dict[str, Any]:
-    """Nodes, edges and clusters for the whole library.
-
-    ``entries`` are the library's entries; ``coverage`` maps a slug to the
-    share of its Spanish the learner already knows.
-    """
+    """Nodes, edges and clusters for the whole library."""
+    from .languages import get_pair_or_default
     from .library import shelf_for
 
     nodes: list[Node] = []
     for entry in entries:
         article = entry.article
         stats = article.stats()
-        shelf, _ = shelf_for(stats["spanish_ratio"])
+        pair = get_pair_or_default(getattr(article, "language_pair", None))
+        ratio = stats.get("target_ratio", stats["spanish_ratio"])
+        shelf, _ = shelf_for(ratio, pair=pair)
         nodes.append(Node(
             slug=article.slug,
             title=article.title,
             shelf=shelf,
             words=stats["words"],
-            spanish_ratio=stats["spanish_ratio"],
+            spanish_ratio=ratio,
             lemmas=content_lemmas(article),
             coverage=coverage.get(article.slug, 0.0),
         ))

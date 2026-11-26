@@ -145,23 +145,10 @@ def verify(text: str) -> tuple[Article | None, Share, bool | None]:
 # --------------------------------------------------------------------------- #
 
 
-def _span_markup(span: Span) -> str:
-    """One span back into the format's inline markup.
-
-    Both markers have to be *whole whitespace-delimited units* to survive a
-    reparse: the parser lifts ``**bold**`` and ``(*gloss*)`` out into placeholder
-    tokens and recognises a token only when it is a unit on its own. So a marker
-    glued to a neighbouring word is not markup at all -- and since the token is
-    what carries the text, a glued ``**bold**`` doesn't just lose its emphasis,
-    it loses the word.
-
-    Hence the fiddling with whitespace: emphasis goes inside the span's own
-    padding, and the gloss goes immediately after the word it glosses -- which is
-    the last word of the span, not after its trailing space -- with that space
-    moved out to follow the gloss.
-    """
+def _span_markup(span: Span, *, target_lang: str = "es") -> str:
+    """One span back into the format's inline markup."""
     text = span.text
-    if span.lang == "es" and span.bold and text.strip():
+    if span.lang == target_lang and span.bold and text.strip():
         lead = text[: len(text) - len(text.lstrip())]
         trail = text[len(text.rstrip()):]
         text = f"{lead}**{text.strip()}**{trail}"
@@ -173,12 +160,8 @@ def _span_markup(span: Span) -> str:
 
 
 def lesson_markdown(article: Article) -> str:
-    """The lesson body and anchors, canonical, with no front matter.
-
-    Regenerated from the parsed article rather than copied from a file on disk:
-    an article may have come from a compilation holding several, and the corpus
-    itself is read-only. Serialising the model gives one shape for every source.
-    """
+    """The lesson body and anchors, canonical, with no front matter."""
+    target_lang = getattr(article, "target_lang", "es")
     lines: list[str] = []
     for block in article.blocks:
         if block.kind == "h":
@@ -189,7 +172,7 @@ def lesson_markdown(article: Article) -> str:
         elif block.kind == "date":
             lines.append(f"*{block.plain.strip()}*")
         else:
-            lines.append("".join(_span_markup(s) for s in block.spans).strip())
+            lines.append("".join(_span_markup(s, target_lang=target_lang) for s in block.spans).strip())
         lines.append("")
 
     if article.vocab or article.grammar:
@@ -225,6 +208,8 @@ def lesson_markdown(article: Article) -> str:
 
 
 def _front_matter_lines(article: Article) -> list[str]:
+    from .languages import DEFAULT_PAIR_ID
+
     lines = ["### Article Identification & Preview", "", f"- **Article Title:** {article.title}"]
     if article.author:
         lines.append(f"- **Author:** {article.author}")
@@ -236,6 +221,12 @@ def _front_matter_lines(article: Article) -> list[str]:
         lines.append(f"- **Level:** {article.level}")
     if article.register:
         lines.append(f"- **Register:** {article.register}")
+    if article.weave:
+        lines.append(f"- **Weave:** {article.weave}")
+    if article.date:
+        lines.append(f"- **Date:** {article.date}")
+    if getattr(article, "language_pair", DEFAULT_PAIR_ID) != DEFAULT_PAIR_ID:
+        lines.append(f"- **Language Pair:** {article.language_pair}")
     return lines
 
 
